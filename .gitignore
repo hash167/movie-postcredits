@@ -1,0 +1,64 @@
+# Environment files
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Kubernetes secrets (configured files)
+kubernetes/all-in-one.yaml
+kubernetes/cronjobs.yaml
+
+# Frontend config (has IPs)
+frontend/config.js
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Database backups
+*.sql
+!scripts/setup_db.sql
+*.sql.gz
+backups/
+
+# SSL certificates
+ssl/
+*.pem
+*.key
+*.crt
+
+# Docker
+.dockerignore
+
+# Logs
+*.log
+logs/
+
+# Sensitive files
+kubeconfig
+secrets.yaml
+
+exports

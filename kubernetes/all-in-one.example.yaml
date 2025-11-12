@@ -1,0 +1,476 @@
+# All-in-One Deployment for Movie Post-Credits API
+#
+# This is a TEMPLATE file. Copy to all-in-one.yaml and configure:
+# cp kubernetes/all-in-one.example.yaml kubernetes/all-in-one.yaml
+#
+# Then update:
+# 1. PostgreSQL password (line 34)
+# 2. MinIO credentials (lines 51-52)
+# 3. API secrets (lines 70-78)
+# 4. Docker image (line 370)
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: movie-api
+
+---
+##############################################################################
+# POSTGRESQL DATABASE
+##############################################################################
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: movie-api
+data:
+  POSTGRES_DB: "moviedb"
+  POSTGRES_USER: "movieuser"
+
+
+---
+##############################################################################
+# MINIO OBJECT STORAGE
+##############################################################################
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-secret
+  namespace: movie-api
+type: Opaque
+stringData:
+  MINIO_ROOT_USER: "minioadmin"  # ⚠️ CHANGE THIS!
+  MINIO_ROOT_PASSWORD: "changeme123"  # ⚠️ CHANGE THIS!
+
+---
+##############################################################################
+# APPLICATION SECRETS
+##############################################################################
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: movie-api-secrets
+  namespace: movie-api
+type: Opaque
+stringData:
+  # Database connection (uses postgres service name)
+  DATABASE_URL: "postgresql://movieuser:CHANGE_PASSWORD@postgres:5432/moviedb"
+  
+  # API Keys
+  OPENAI_API_KEY: "sk-your-openai-key-here"  # ⚠️ CHANGE THIS!
+  TMDB_API_KEY: "your-tmdb-key-here"  # ⚠️ CHANGE THIS!
+  
+  # MinIO/S3 Configuration (uses minio service name)
+  S3_ENDPOINT: "http://minio:9000"
+  S3_BUCKET: "movies"
+  S3_ACCESS_KEY: "minioadmin"  # Same as MINIO_ROOT_USER
+  S3_SECRET_KEY: "changeme123"  # Same as MINIO_ROOT_PASSWORD
+  S3_REGION: "us-east-1"
+
+---
+##############################################################################
+# APPLICATION CONFIG
+##############################################################################
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: movie-api-config
+  namespace: movie-api
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "info"
+  GUNICORN_WORKERS: "4"
+  CORS_ORIGINS: "http://localhost:3000,http://localhost:8080"
+  ALLOWED_HOSTS: "*"
+
+---
+##############################################################################
+# PERSISTENT VOLUMES
+##############################################################################
+
+# PostgreSQL Volume
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: postgres-pv
+  labels:
+    type: local
+    app: postgres
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: "/mnt/data/postgres"
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: movie-api
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+# MinIO Volume
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: minio-pv
+  labels:
+    type: local
+    app: minio
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: "/mnt/data/minio"
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-pvc
+  namespace: movie-api
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+
+---
+##############################################################################
+# POSTGRESQL DEPLOYMENT
+##############################################################################
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: movie-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        ports:
+        - containerPort: 5432
+        envFrom:
+        - configMapRef:
+            name: postgres-config
+        - secretRef:
+            name: postgres-secret
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+          subPath: postgres
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: movie-api
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5432
+    targetPort: 5432
+  selector:
+    app: postgres
+
+---
+##############################################################################
+# MINIO DEPLOYMENT
+##############################################################################
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: movie-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+      - name: minio
+        image: minio/minio:latest
+        args:
+        - server
+        - /data
+        - --console-address
+        - ":9001"
+        ports:
+        - containerPort: 9000
+        - containerPort: 9001
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: MINIO_ROOT_USER
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: MINIO_ROOT_PASSWORD
+        - name: MINIO_API_CORS_ALLOW_ORIGIN
+          value: "*"
+        - name: MINIO_BROWSER_REDIRECT_URL
+          value: "http://YOUR_NODE_IP:30900"  # ⚠️ Update with your IP
+        volumeMounts:
+        - name: minio-storage
+          mountPath: /data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: minio-storage
+        persistentVolumeClaim:
+          claimName: minio-pvc
+
+---
+# MinIO API Service (exposed for direct S3/browser access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: movie-api
+spec:
+  type: NodePort
+  ports:
+  - port: 9000
+    targetPort: 9000
+    nodePort: 30901
+    name: api
+  selector:
+    app: minio
+
+---
+# MinIO Console (external access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-console
+  namespace: movie-api
+spec:
+  type: NodePort
+  ports:
+  - port: 9001
+    targetPort: 9001
+    nodePort: 30900
+    name: console
+  selector:
+    app: minio
+
+---
+##############################################################################
+# MOVIE API DEPLOYMENT
+##############################################################################
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: movie-api
+  namespace: movie-api
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: movie-api
+  template:
+    metadata:
+      labels:
+        app: movie-api
+    spec:
+      # Wait for dependencies
+      initContainers:
+      - name: wait-for-postgres
+        image: postgres:16-alpine
+        command:
+        - sh
+        - -c
+        - |
+          until pg_isready -h postgres -p 5432; do
+            echo "Waiting for postgres..."
+            sleep 2
+          done
+      - name: wait-for-minio
+        image: minio/mc:latest
+        command:
+        - sh
+        - -c
+        - |
+          until mc alias set myminio http://minio:9000 minioadmin changeme123 2>/dev/null; do
+            echo "Waiting for minio..."
+            sleep 2
+          done
+      containers:
+      - name: api
+        image: your-dockerhub-username/movie-api:latest  # ⚠️ CHANGE THIS!
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: movie-api-config
+        - secretRef:
+            name: movie-api-secrets
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: exports
+          mountPath: /app/exports
+      volumes:
+      - name: exports
+        emptyDir: {}
+
+---
+# API Service (external access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: movie-api
+  namespace: movie-api
+spec:
+  type: NodePort
+  ports:
+  - port: 8000
+    targetPort: 8000
+    nodePort: 30800
+    name: http
+  selector:
+    app: movie-api
+
+---
+##############################################################################
+# INITIALIZATION JOBS
+##############################################################################
+
+# Create MinIO bucket
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-setup
+  namespace: movie-api
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: mc
+        image: minio/mc:latest
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: MINIO_ROOT_USER
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: MINIO_ROOT_PASSWORD
+        command:
+        - /bin/sh
+        - -c
+        - |
+          until mc alias set myminio http://minio:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD; do
+            echo "Waiting for MinIO..."
+            sleep 5
+          done
+          mc mb myminio/movies --ignore-existing
+          mc anonymous set download myminio/movies
+          echo "MinIO setup complete!"
+  backoffLimit: 10
+
+---
+##############################################################################
+# AUTO-SCALING
+##############################################################################
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: movie-api-hpa
+  namespace: movie-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: movie-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+

@@ -1,0 +1,95 @@
+# Kubernetes CronJob for Theater Movies Batch Processing
+#
+# This is a TEMPLATE file. Copy to cronjobs.yaml and configure:
+# cp kubernetes/cronjobs.example.yaml kubernetes/cronjobs.yaml
+#
+# Then update:
+# - Line 57: Your Docker image
+#
+# Deploy:
+# kubectl apply -f kubernetes/cronjobs.yaml
+#
+# Manual trigger:
+# kubectl create job --from=cronjob/theaters-daily theaters-manual-$(date +%s) -n movie-api
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: theaters-daily
+  namespace: movie-api
+  labels:
+    app: movie-batch
+    tier: theaters
+spec:
+  # Schedule: Every day at 2:00 AM UTC
+  # Adjust schedule as needed:
+  #   "0 2 * * *"     = Daily at 2 AM
+  #   "0 */6 * * *"   = Every 6 hours
+  #   "0 8,20 * * *"  = Twice daily (8 AM and 8 PM)
+  schedule: "0 2 * * *"
+  
+  # Keep last 3 successful and 1 failed job for debugging
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  
+  # Prevent concurrent runs (wait for previous job to finish)
+  concurrencyPolicy: Forbid
+  
+  # Job template
+  jobTemplate:
+    spec:
+      # Don't retry failed jobs automatically
+      backoffLimit: 0
+      
+      # Clean up completed jobs after 24 hours
+      ttlSecondsAfterFinished: 86400
+      
+      template:
+        metadata:
+          labels:
+            app: movie-batch
+            tier: theaters
+        spec:
+          restartPolicy: Never
+          
+          containers:
+          - name: batch-processor
+            image: your-dockerhub-username/movie-api:latest  # ⚠️ CHANGE THIS!
+            imagePullPolicy: Always
+            
+            # Run batch processing for theater movies
+            command: ["python"]
+            args:
+            - "-m"
+            - "src.run_batch"
+            - "--mode"
+            - "theaters"      # Process theater movies
+            - "--export"       # Export to JSON
+            - "--upload"       # Upload to MinIO
+            
+            # Load environment variables (DB, API keys, MinIO config)
+            envFrom:
+            - configMapRef:
+                name: movie-api-config
+            - secretRef:
+                name: movie-api-secrets
+            
+            # Resource limits (adjust if needed)
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "500m"
+              limits:
+                memory: "1Gi"
+                cpu: "1000m"
+            
+            # Mount for temporary export files
+            volumeMounts:
+            - name: exports
+              mountPath: /app/exports
+          
+          volumes:
+          - name: exports
+            emptyDir: {}
+
