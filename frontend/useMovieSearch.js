@@ -60,10 +60,14 @@ window.useMovieSearch = function(movieTitle, year) {
     setError(null);
     setPollCount(0);
 
+    let cancelled = false;
+    let stopPolling = () => {};
+
     async function search() {
       // Step 1: CDN search
       const cdnResult = searchInCDN(movieTitle, year);
       if (cdnResult) {
+        if (cancelled) return;
         setMovie({ ...cdnResult.movie, source: 'cdn', tier: cdnResult.tier, instant: true });
         setSource('cdn');
         setLoading(false);
@@ -78,21 +82,29 @@ window.useMovieSearch = function(movieTitle, year) {
           body: JSON.stringify({ query: movieTitle, year }),
         });
         const data = await response.json();
+        if (cancelled) return;
         setMovie({ ...data, source: data.cached ? 'api-cached' : 'api-processing', instant: false });
         setSource(data.cached ? 'api-cached' : 'api-processing');
         setLoading(false);
 
         // If processing, start auto-polling
         if (!data.cached) {
-          startAutoPolling(data.id);
+          stopPolling = startAutoPolling(data.id);
+          if (cancelled) stopPolling();
         }
       } catch (e) {
+        if (cancelled) return;
         setError(e.message || 'API error');
         setLoading(false);
       }
     }
 
     search();
+
+    return () => {
+      cancelled = true;
+      stopPolling();
+    };
     // eslint-disable-next-line
   }, [movieTitle, year]);
 
@@ -145,7 +157,6 @@ window.useMovieSearch = function(movieTitle, year) {
       }
     }, 30000); // Poll every 30 seconds
     
-    // Clean up on component unmount
     return () => clearInterval(pollInterval);
   }
 

@@ -137,15 +137,20 @@ class RedditScraper:
 
         return unique_results[:limit]
 
+    @staticmethod
+    def _has_imdb_content(imdb_data: Optional[dict]) -> bool:
+        """True when IMDb trivia or goofs are present to analyze."""
+        return bool(imdb_data and (imdb_data.get("trivia") or imdb_data.get("goofs")))
+
     async def analyze_with_gpt(
         self, movie_title: str, posts: List[Dict], imdb_data: Optional[dict] = None
     ) -> Optional[RedditInsights]:
-        """Use OpenAI to analyze Reddit posts for insights"""
+        """Use OpenAI to analyze Reddit posts and/or IMDb trivia for insights"""
 
-        if not posts:
+        if not posts and not self._has_imdb_content(imdb_data):
             return None
 
-        # Prepare context from Reddit posts
+        # Prepare context from Reddit posts (empty list is fine for IMDb-only)
         context = []
         for i, post in enumerate(posts[:20], 1):
             context.append(f"Post {i} (score: {post['score']}):")
@@ -155,11 +160,11 @@ class RedditScraper:
                 context.append(f"Body: {post['body'][:500]}")
             context.append(f"URL: {post['url']}\n")
 
-        context_text = "\n".join(context)
+        context_text = "\n".join(context) if context else "(none)"
 
         # Add IMDb data to prompt if available
         imdb_section = ""
-        if imdb_data and (imdb_data.get('trivia') or imdb_data.get('goofs')):
+        if self._has_imdb_content(imdb_data):
             trivia_list = "\n".join([f"- {t[:300]}" for t in imdb_data.get('trivia', [])[:15]])
             goofs_list = "\n".join([f"- {g[:300]}" for g in imdb_data.get('goofs', [])[:10]])
             
@@ -202,7 +207,8 @@ IMDb Goofs:
 }}
 
 Guidelines:
-- Only include information explicitly mentioned in the posts
+- Only include information explicitly mentioned in the
+  Reddit posts or IMDb trivia/goofs
 - For post_credits.descriptions, include separate entries
   for mid-credits and post-credits scenes
 - Keep descriptions spoiler-light but informative
