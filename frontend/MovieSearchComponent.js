@@ -358,7 +358,7 @@ window.MovieSearchComponent = function() {
               <h3 style={{ color: '#234e52', marginBottom: '12px' }}>Analyzing Movie...</h3>
               <p style={{ color: '#4a5568', marginBottom: '8px' }}>
                 🎬 Checking TMDB credit-scene keywords<br/>
-                🤖 Writing easter-egg notes with Ollama<br/>
+                🔎 Reading live articles, then Ollama extract<br/>
                 🥚 Saving post-credits info
               </p>
               <p style={{ color: '#718096', fontSize: '14px', marginTop: '16px' }}>

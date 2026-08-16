@@ -119,10 +119,15 @@ class DatabaseManager:
                         pc.spoiler_free_hint,
                         "medium",
                     )
-                    await conn.execute(
-                        "DELETE FROM easter_eggs WHERE movie_id=$1", movie.id
-                    )
-                    for egg in movie.reddit_insights.easter_eggs:
+                    # Do not wipe existing eggs when the new scrape found none
+                    # (no articles, Ollama empty, or model cutoff).
+                    new_eggs = movie.reddit_insights.easter_eggs or []
+                    if new_eggs:
+                        await conn.execute(
+                            "DELETE FROM easter_eggs WHERE movie_id=$1",
+                            movie.id,
+                        )
+                    for egg in new_eggs:
                         mapped = egg_to_live_columns(
                             egg.detail, egg.significance
                         )

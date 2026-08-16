@@ -1,8 +1,8 @@
-"""TMDB keywords + Ollama easter-egg writeups.
+"""TMDB keywords + live-web articles + Ollama extract.
 
 TMDB keyword 179430 = post-credits scene, 179431 = mid-credits scene.
 Those tags are the source of truth for has_scene / scene_count.
-Ollama only writes widely published easter-egg / credits hints.
+Easter eggs come from fetched articles, not the model's training cutoff.
 """
 
 import json
@@ -13,6 +13,7 @@ import httpx
 
 from src.config import settings
 from src.models import EasterEgg, PostCreditsScene, RedditInsights
+from src.web_search import gather_article_corpus
 
 KEYWORD_POST_CREDITS = 179430
 KEYWORD_MID_CREDITS = 179431
@@ -137,22 +138,27 @@ class MovieInsights:
             f"post={KEYWORD_POST_CREDITS in keyword_ids(keywords)} "
             f"has_scene={post_credits.has_scene} scene_count={post_credits.scene_count}"
         )
-        eggs = await self.extract_easter_eggs(details, keywords)
+        eggs, source_urls = await self.extract_easter_eggs(details, keywords)
         return RedditInsights(
             easter_eggs=eggs,
             post_credits=post_credits,
-            reddit_discussion_count=0,
-            source_urls=[],
+            reddit_discussion_count=len(source_urls),
+            source_urls=source_urls,
         )
 
     async def extract_easter_eggs(
         self, details: Dict, keywords: Optional[List[Dict]] = None
-    ) -> List[EasterEgg]:
+    ) -> tuple:
+        """Search live articles, then ask Ollama to extract only that text.
+
+        Returns (eggs, source_urls). If no articles are fetched, eggs are
+        empty so upsert_movie will not wipe rows already in Postgres.
+        """
         keywords = keywords if keywords is not None else extract_keywords(details)
         title = details.get("title") or "Unknown"
         release_date = details.get("release_date") or ""
-        year = None
-        if release_date and len(release_date) >= 4:
+        year = details.get("year")
+        if not year and release_date and len(release_date) >= 4:
             try:
                 year = int(release_date[:4])
             except ValueError:
@@ -163,24 +169,36 @@ class MovieInsights:
         ]
         year_bit = f" ({year})" if year else ""
         keyword_bit = ", ".join(keyword_names) if keyword_names else "(none)"
+
+        corpus = await gather_article_corpus(title, year)
+        article_text = (corpus.get("text") or "").strip()
+        source_urls = list(corpus.get("urls") or [])
+        if not article_text:
+            print("  ⚠️  No live articles found; leaving easter eggs unchanged")
+            return [], []
+
         system_msg = (
-            "You extract widely published easter eggs and credits hints. "
-            "Respond with a JSON object only. Never invent or guess. "
-            "If you are not confident a fact is widely published, omit it."
+            "You extract easter eggs and post-credits hints from the provided "
+            "article text only. Respond with a JSON object. Never invent. "
+            "If a fact is not clearly stated in the articles, omit it."
         )
         prompt = (
-            f'Widely published easter eggs / credits hints for "{title}"{year_bit}.\n\n'
-            f"Overview:\n{overview or '(none)'}\n\n"
-            f"TMDB keywords: {keyword_bit}\n\n"
-            "Use ONLY the title, year, overview, and TMDB keywords above, "
-            "plus facts that are commonly reported by major outlets. "
-            "Do not invent scenes, cameos, or eggs. "
-            "If unsure, return an empty easter_eggs array.\n\n"
+            f'Extract easter eggs / credits hints for "{title}"{year_bit} '
+            "ONLY from the articles below.\n\n"
+            f"Overview (context, not a source): {overview or '(none)'}\n"
+            f"TMDB keywords (context, not a source): {keyword_bit}\n\n"
+            "ARTICLES:\n"
+            f"{article_text}\n\n"
+            "Rules:\n"
+            "- Use only facts written in the articles.\n"
+            "- Do not use your own knowledge of the movie.\n"
+            "- If the articles do not mention eggs or credits scenes, "
+            "return an empty easter_eggs array.\n\n"
             "JSON shape:\n"
             "{\n"
             '  "easter_eggs": [\n'
             "    {\n"
-            '      "detail": "widely published easter egg or credits hint",\n'
+            '      "detail": "fact copied from the articles",\n'
             '      "significance": "what it references"\n'
             "    }\n"
             "  ]\n"
@@ -189,11 +207,11 @@ class MovieInsights:
         try:
             payload = await self._chat_json(system_msg, prompt)
             eggs = eggs_from_model_payload(payload)
-            print(f"  ✓ Ollama easter eggs: {len(eggs)}")
-            return eggs
+            print(f"  ✓ Ollama extracted {len(eggs)} eggs from articles")
+            return eggs, source_urls
         except Exception as exc:
-            print(f"  ⚠️  Ollama easter-egg writeup failed: {exc}")
-            return []
+            print(f"  ⚠️  Ollama easter-egg extract failed: {exc}")
+            return [], source_urls
 
     async def _chat_json(self, system_msg: str, prompt: str) -> Dict[str, Any]:
         url = f"{self.ollama_host}/v1/chat/completions"

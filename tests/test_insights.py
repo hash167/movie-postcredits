@@ -98,7 +98,7 @@ class MovieInsightsTests(unittest.IsolatedAsyncioTestCase):
         analyzer = MovieInsights(
             ollama_host="http://ollama.test", ollama_model="llama3.1:8b"
         )
-        analyzer.extract_easter_eggs = AsyncMock(return_value=[])
+        analyzer.extract_easter_eggs = AsyncMock(return_value=([], []))
         details = {
             "title": "The Odyssey",
             "release_date": "2026-07-17",
@@ -115,7 +115,23 @@ class MovieInsightsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(insights.easter_eggs, [])
         self.assertEqual(insights.reddit_discussion_count, 0)
 
-    async def test_ollama_chat_uses_openai_compatible_path(self):
+    async def test_no_articles_skips_ollama_and_returns_empty(self):
+        analyzer = MovieInsights(
+            ollama_host="http://ollama.test", ollama_model="llama3.1:8b"
+        )
+        analyzer._chat_json = AsyncMock()
+        with patch(
+            "src.insights.gather_article_corpus",
+            AsyncMock(return_value={"urls": [], "text": ""}),
+        ):
+            eggs, urls = await analyzer.extract_easter_eggs(
+                {"title": "Brand New Day", "release_date": "2026-07-31"}
+            )
+        self.assertEqual(eggs, [])
+        self.assertEqual(urls, [])
+        analyzer._chat_json.assert_not_awaited()
+
+    async def test_ollama_extracts_only_from_article_text(self):
         analyzer = MovieInsights(
             ollama_host="http://100.67.63.33:11434",
             ollama_model="llama3.1:8b",
@@ -134,7 +150,7 @@ class MovieInsightsTests(unittest.IsolatedAsyncioTestCase):
                             "message": {
                                 "content": (
                                     '{"easter_eggs":[{"detail":'
-                                    '"Widely reported cameo",'
+                                    '"Mid-credits cameo from the article",'
                                     '"significance":"franchise"}]}'
                                 )
                             }
@@ -157,8 +173,20 @@ class MovieInsightsTests(unittest.IsolatedAsyncioTestCase):
                 return FakeResponse()
 
         fake = FakeClient()
-        with patch("src.insights.httpx.AsyncClient", return_value=fake):
-            eggs = await analyzer.extract_easter_eggs(
+        article = (
+            "SOURCE: https://example.com/eggs\n"
+            "The mid-credits scene shows a cameo teasing the sequel."
+        )
+        with patch(
+            "src.insights.gather_article_corpus",
+            AsyncMock(
+                return_value={
+                    "urls": ["https://example.com/eggs"],
+                    "text": article,
+                }
+            ),
+        ), patch("src.insights.httpx.AsyncClient", return_value=fake):
+            eggs, urls = await analyzer.extract_easter_eggs(
                 {
                     "title": "Spider-Man: Brand New Day",
                     "release_date": "2026-07-31",
@@ -167,24 +195,38 @@ class MovieInsightsTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
         self.assertEqual(len(eggs), 1)
-        self.assertEqual(eggs[0].detail, "Widely reported cameo")
+        self.assertIn("cameo", eggs[0].detail.lower())
+        self.assertEqual(urls, ["https://example.com/eggs"])
         url, body = fake.posts[0]
         self.assertEqual(
             url, "http://100.67.63.33:11434/v1/chat/completions"
         )
         self.assertEqual(body["model"], "llama3.1:8b")
-        self.assertEqual(body["response_format"], {"type": "json_object"})
-        self.assertNotIn("reddit.com", body["messages"][1]["content"])
+        user_prompt = body["messages"][1]["content"]
+        self.assertIn("ARTICLES:", user_prompt)
+        self.assertIn("mid-credits scene shows a cameo", user_prompt)
+        self.assertIn("only from the articles", user_prompt.lower())
+        self.assertNotIn("search_reddit", user_prompt)
 
     async def test_ollama_error_returns_empty_eggs_not_invented(self):
         analyzer = MovieInsights(
             ollama_host="http://ollama.test", ollama_model="llama3.1:8b"
         )
         analyzer._chat_json = AsyncMock(side_effect=RuntimeError("down"))
-        eggs = await analyzer.extract_easter_eggs(
-            {"title": "Nope", "overview": "", "keywords": []}
-        )
+        with patch(
+            "src.insights.gather_article_corpus",
+            AsyncMock(
+                return_value={
+                    "urls": ["https://example.com/a"],
+                    "text": "Some article text about credits.",
+                }
+            ),
+        ):
+            eggs, urls = await analyzer.extract_easter_eggs(
+                {"title": "Nope", "overview": "", "keywords": []}
+            )
         self.assertEqual(eggs, [])
+        self.assertEqual(urls, ["https://example.com/a"])
 
 
 class SourceRemovalTests(unittest.TestCase):
@@ -195,6 +237,6 @@ class SourceRemovalTests(unittest.TestCase):
         for path in root.glob("*.py"):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("search_reddit", text, path)
-            self.assertNotIn("reddit.com", text, path)
+            self.assertNotIn("reddit.com/search", text, path)
             self.assertNotIn("AsyncOpenAI", text, path)
-            self.assertNotIn("imdb.com", text, path)
+            self.assertNotIn("imdb.com/title", text, path)

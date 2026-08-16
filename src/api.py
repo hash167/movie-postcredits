@@ -170,7 +170,7 @@ async def search_movie(request: SearchRequest):
                 tier="on-demand",
             )
             
-            print(f"Analyzing TMDB + Ollama for: {movie_obj.title} {movie_obj.year}")
+            print(f"Analyzing TMDB + web articles + Ollama for: {movie_obj.title} {movie_obj.year}")
             reddit_insights = await movie_insights.analyze_movie(full_movie)
             print(f"✓ Easter eggs: {len(reddit_insights.easter_eggs)}")
             print(f"✓ Post-credits: {reddit_insights.post_credits.has_scene}")
