@@ -61,7 +61,6 @@ stringData:
   DATABASE_URL: "postgresql://movieuser:CHANGE_PASSWORD@postgres:5432/moviedb"
   
   # API Keys
-  OPENAI_API_KEY: "sk-your-openai-key-here"  # ⚠️ CHANGE THIS!
   TMDB_API_KEY: "your-tmdb-key-here"  # ⚠️ CHANGE THIS!
   
   # MinIO/S3 Configuration (uses minio service name)
@@ -87,6 +86,8 @@ data:
   GUNICORN_WORKERS: "4"
   CORS_ORIGINS: "http://localhost:3000,http://localhost:8080"
   ALLOWED_HOSTS: "*"
+  OLLAMA_HOST: "http://100.67.63.33:11434"
+  OLLAMA_MODEL: "llama3.1:8b"
 
 ---
 ##############################################################################

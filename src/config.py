@@ -2,9 +2,12 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    openai_api_key: str
     tmdb_api_key: str
     database_url: str
+    # OpenAI is no longer required; batch uses TMDB + Ollama.
+    openai_api_key: str = ""
+    ollama_host: str = "http://100.67.63.33:11434"
+    ollama_model: str = "llama3.1:8b"
 
     # S3-Compatible Storage Configuration (MinIO, AWS S3, etc.)
     s3_endpoint: str = "http://localhost:9000"  # MinIO default

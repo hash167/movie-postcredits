@@ -5,7 +5,7 @@ Batch processor for collecting movie and post-credits data
 import asyncio
 from typing import Dict
 from src.tmdb_client import TMDBClient
-from src.reddit_scraper import RedditScraper
+from src.insights import MovieInsights
 from src.database import DatabaseManager
 from src.models import EnhancedMovie
 
@@ -15,7 +15,7 @@ class BatchProcessor:
 
     def __init__(self):
         self.tmdb = TMDBClient()
-        self.reddit = RedditScraper()
+        self.insights = MovieInsights()
         self.db = DatabaseManager()
 
     async def initialize(self):
@@ -113,10 +113,7 @@ class BatchProcessor:
         # Format movie data
         formatted = self.tmdb.format_movie(details, tier)
 
-        # Search Reddit and IMDb for insights
-        year = formatted.get("year")
-        imdb_id = formatted.get("imdb_id")
-        insights = await self.reddit.scrape_movie_insights(title, year, imdb_id)
+        insights = await self.insights.analyze_movie(details)
 
         # Create EnhancedMovie object
         enhanced_movie = EnhancedMovie(**formatted, reddit_insights=insights)
@@ -124,13 +121,9 @@ class BatchProcessor:
         # Save to database
         await self.db.upsert_movie(enhanced_movie)
 
-        if insights:
-            has_scene = insights.post_credits.has_scene
-            egg_count = len(insights.easter_eggs)
-            msg = f"Post-credits={has_scene}, Easter eggs={egg_count}"
-            print(f"  ✓ Saved: {msg}")
-        else:
-            print("  ✓ Saved (no Reddit insights)")
+        has_scene = insights.post_credits.has_scene
+        egg_count = len(insights.easter_eggs)
+        print(f"  ✓ Saved: Post-credits={has_scene}, Easter eggs={egg_count}")
 
     async def process_specific_movie(self, title: str, year: int = None):
         """Process a specific movie by title"""
@@ -181,10 +174,7 @@ class BatchProcessor:
                 # Get fresh data from TMDB
                 details = await self.tmdb.get_movie_details(movie["id"])
                 if details:
-                    # Scrape Reddit for new insights
-                    insights = await self.reddit.scrape_movie_insights(
-                        movie["title"], movie.get("year")
-                    )
+                    insights = await self.insights.analyze_movie(details)
 
                     # Format and save
                     tier_val = movie.get("tier", "on-demand")

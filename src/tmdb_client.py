@@ -81,13 +81,37 @@ class TMDBClient:
             data = response.json()
             return data["results"][0] if data.get("results") else None
 
-    async def get_movie_details(self, movie_id: int) -> Optional[Dict]:
-        url = f"{self.base_url}/movie/{movie_id}"
-        params = {"api_key": self.api_key, "language": "en-US"}
+    async def get_movie_keywords(self, movie_id: int) -> List[Dict]:
+        """Dedicated /movie/{id}/keywords call."""
+        url = f"{self.base_url}/movie/{movie_id}/keywords"
+        params = {"api_key": self.api_key}
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+        return data.get("keywords") or data.get("results") or []
+
+    async def get_movie_details(self, movie_id: int) -> Optional[Dict]:
+        url = f"{self.base_url}/movie/{movie_id}"
+        params = {
+            "api_key": self.api_key,
+            "language": "en-US",
+            "append_to_response": "keywords",
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+        from src.insights import extract_keywords
+
+        if not extract_keywords(data):
+            try:
+                keywords = await self.get_movie_keywords(movie_id)
+                if keywords:
+                    data["keywords"] = {"keywords": keywords}
+            except Exception as exc:
+                print(f"  ⚠️  TMDB keywords fallback failed: {exc}")
+        return data
 
     def format_movie(self, movie_data: Dict, tier: str) -> Dict:
         release_date = movie_data.get("release_date")

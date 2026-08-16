@@ -12,7 +12,7 @@ import asyncio
 
 from src.database import DatabaseManager
 from src.tmdb_client import TMDBClient
-from src.reddit_scraper import RedditScraper
+from src.insights import MovieInsights
 from src.sync_job import sync_job
 from src.schema_compat import normalize_easter_eggs, worth_staying_to_bool
 
@@ -49,7 +49,7 @@ app.add_middleware(
 # Initialize managers
 db = DatabaseManager()
 tmdb = TMDBClient()
-reddit_scraper = RedditScraper()
+movie_insights = MovieInsights()
 
 
 class SearchRequest(BaseModel):
@@ -159,7 +159,7 @@ async def search_movie(request: SearchRequest):
             movie_obj = EnhancedMovie(
                 id=full_movie["id"],
                 title=full_movie["title"],
-                year=year,
+                year=year or 0,
                 release_date=full_movie.get("release_date"),
                 runtime_minutes=full_movie.get("runtime", 0),
                 poster_path=poster_url,
@@ -170,29 +170,20 @@ async def search_movie(request: SearchRequest):
                 tier="on-demand",
             )
             
-            # Scrape Reddit and IMDb, then analyze
-            print(f"Scraping Reddit + IMDb for: {movie_obj.title} {movie_obj.year}")
-            reddit_insights = await reddit_scraper.scrape_movie_insights(
-                movie_obj.title, movie_obj.year, movie_obj.imdb_id
-            )
-            
-            if reddit_insights:
-                print(f"✓ Found insights: {reddit_insights.reddit_discussion_count} discussions")
-                print(f"✓ Easter eggs: {len(reddit_insights.easter_eggs)}")
-                print(f"✓ Post-credits: {reddit_insights.post_credits.has_scene}")
-                movie_obj.reddit_insights = reddit_insights
-            else:
-                print("⚠ No Reddit insights found")
+            print(f"Analyzing TMDB + Ollama for: {movie_obj.title} {movie_obj.year}")
+            reddit_insights = await movie_insights.analyze_movie(full_movie)
+            print(f"✓ Easter eggs: {len(reddit_insights.easter_eggs)}")
+            print(f"✓ Post-credits: {reddit_insights.post_credits.has_scene}")
+            movie_obj.reddit_insights = reddit_insights
             
             # Save everything to database
             await db.upsert_movie(movie_obj)
             print(f"✓ Saved to database")
             
-            # Check if movie has content worth exporting
-            has_content = False
-            if reddit_insights:
-                has_content = (reddit_insights.post_credits.has_scene or 
-                              len(reddit_insights.easter_eggs) > 0)
+            has_content = (
+                reddit_insights.post_credits.has_scene
+                or len(reddit_insights.easter_eggs) > 0
+            )
             
             # Export and upload to MinIO if has content
             if has_content:
@@ -360,58 +351,56 @@ async def refresh_movie_analysis(movie_id: int):
             print(f"🔄 Re-analyzing: {movie['title']} (ID: {movie_id})")
             print(f"{'='*60}")
             
-            # Scrape fresh data
-            reddit_insights = await reddit_scraper.scrape_movie_insights(
-                movie['title'], movie.get('year'), movie.get('imdb_id')
+            full_movie = await tmdb.get_movie_details(movie_id)
+            if not full_movie:
+                print("⚠ Could not refresh TMDB details")
+                return
+            reddit_insights = await movie_insights.analyze_movie(full_movie)
+            print(f"✓ Easter eggs: {len(reddit_insights.easter_eggs)}")
+            print(f"✓ Post-credits: {reddit_insights.post_credits.has_scene}")
+
+            movie_obj = EnhancedMovie(
+                id=movie['id'],
+                title=movie['title'],
+                year=movie['year'],
+                release_date=movie.get('release_date'),
+                runtime_minutes=movie.get('runtime_minutes', 0),
+                poster_path=movie.get('poster_path'),
+                overview=movie.get('overview', ''),
+                vote_average=movie.get('vote_average', 0.0),
+                popularity=movie.get('popularity', 0.0),
+                imdb_id=movie.get('imdb_id'),
+                tier=movie.get('tier', 'on-demand'),
+                reddit_insights=reddit_insights
             )
-            
-            if reddit_insights:
-                print(f"✓ Fresh insights: {reddit_insights.reddit_discussion_count} discussions")
-                print(f"✓ Easter eggs: {len(reddit_insights.easter_eggs)}")
-                print(f"✓ Post-credits: {reddit_insights.post_credits.has_scene}")
-                
-                # Update movie with fresh insights
-                movie_obj = EnhancedMovie(
-                    id=movie['id'],
-                    title=movie['title'],
-                    year=movie['year'],
-                    release_date=movie.get('release_date'),
-                    runtime_minutes=movie.get('runtime_minutes', 0),
-                    poster_path=movie.get('poster_path'),
-                    overview=movie.get('overview', ''),
-                    vote_average=movie.get('vote_average', 0.0),
-                    popularity=movie.get('popularity', 0.0),
-                    imdb_id=movie.get('imdb_id'),
-                    tier=movie.get('tier', 'on-demand'),
-                    reddit_insights=reddit_insights
-                )
-                
-                await db.upsert_movie(movie_obj)
-                print("✓ Updated in database")
-                
-                # Export to MinIO if has content
-                has_content = (reddit_insights.post_credits.has_scene or 
-                              len(reddit_insights.easter_eggs) > 0)
-                
-                if has_content:
-                    print("📤 Exporting to MinIO...")
-                    from src.json_exporter import JSONExporter
-                    from src.storage_uploader import StorageUploader
-                    
-                    exporter = JSONExporter()
-                    uploader = StorageUploader()
-                    
-                    await exporter.initialize()
-                    try:
-                        tier = movie.get('tier', 'on-demand')
-                        filepath = await exporter.export_tier(tier)
-                        await uploader.upload_file(filepath)
-                        print("✓ Exported to MinIO")
-                    finally:
-                        await exporter.close()
-                
-                print(f"{'='*60}\n")
-            
+
+            await db.upsert_movie(movie_obj)
+            print("✓ Updated in database")
+
+            has_content = (
+                reddit_insights.post_credits.has_scene
+                or len(reddit_insights.easter_eggs) > 0
+            )
+
+            if has_content:
+                print("📤 Exporting to MinIO...")
+                from src.json_exporter import JSONExporter
+                from src.storage_uploader import StorageUploader
+
+                exporter = JSONExporter()
+                uploader = StorageUploader()
+
+                await exporter.initialize()
+                try:
+                    tier = movie.get('tier', 'on-demand')
+                    filepath = await exporter.export_tier(tier)
+                    await uploader.upload_file(filepath)
+                    print("✓ Exported to MinIO")
+                finally:
+                    await exporter.close()
+
+            print(f"{'='*60}\n")
+
         except Exception as e:
             print(f"❌ Error re-analyzing: {e}")
             import traceback

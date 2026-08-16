@@ -53,8 +53,9 @@ if [ ! -f .env ]; then
     echo "${YELLOW}Creating .env file for local development...${NC}"
     cat > .env << 'EOF'
 # API Keys (Add your keys here)
-OPENAI_API_KEY=sk-your-openai-api-key
 TMDB_API_KEY=your-tmdb-api-key
+OLLAMA_HOST=http://100.67.63.33:11434
+OLLAMA_MODEL=llama3.1:8b
 
 # Database (local PostgreSQL)
 DATABASE_URL=postgresql://movieuser:moviepass@localhost:5432/moviedb
@@ -71,7 +72,7 @@ S3_PUBLIC_URL=
 EXPORT_DIR=./exports
 EOF
     echo "${GREEN}✓${NC} Created .env file"
-    echo "${YELLOW}⚠️  Please edit .env and add your OPENAI_API_KEY and TMDB_API_KEY${NC}"
+    echo "${YELLOW}⚠️  Please edit .env and add your TMDB_API_KEY${NC}"
 else
     echo ""
     echo "ℹ️  .env file already exists (skipping creation)"

@@ -62,7 +62,7 @@ window.MovieSearchComponent = function() {
         setRefreshMessage(data.message);
         setRefreshing(false);
       } else if (data.status === 'processing') {
-        setRefreshMessage('🔄 Re-analyzing with fresh Reddit & IMDb data...');
+        setRefreshMessage('🔄 Re-analyzing with TMDB keywords and Ollama...');
         // Start polling
         setTimeout(() => {
           setQuery('');
@@ -357,9 +357,9 @@ window.MovieSearchComponent = function() {
               <div style={{ fontSize: '48px', marginBottom: '12px' }}>⏳</div>
               <h3 style={{ color: '#234e52', marginBottom: '12px' }}>Analyzing Movie...</h3>
               <p style={{ color: '#4a5568', marginBottom: '8px' }}>
-                🔍 Scraping Reddit discussions<br/>
-                🤖 Analyzing with AI<br/>
-                🥚 Extracting easter eggs & post-credits info
+                🎬 Checking TMDB credit-scene keywords<br/>
+                🤖 Writing easter-egg notes with Ollama<br/>
+                🥚 Saving post-credits info
               </p>
               <p style={{ color: '#718096', fontSize: '14px', marginTop: '16px' }}>
                 This page will automatically update in 30-60 seconds when complete.
@@ -453,7 +453,7 @@ window.MovieSearchComponent = function() {
                 </div>
               )}
               <p style={{ marginTop: '8px', fontSize: '12px', color: '#718096', textAlign: 'center' }}>
-                Re-scrapes Reddit + IMDb for fresh easter eggs (15 min cooldown)
+                Re-checks TMDB keywords + Ollama writeups (15 min cooldown)
               </p>
             </div>
           )}
