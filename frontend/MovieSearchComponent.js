@@ -1,5 +1,27 @@
 const { useState, useEffect } = React;
 
+function posterSrc(url) {
+  return window.rewritePoster ? window.rewritePoster(url) : url;
+}
+
+function isWorthStaying(value) {
+  return value === true || value === 'yes' || value === 'true';
+}
+
+function eggHeading(egg) {
+  if (typeof egg === 'string') return egg;
+  return egg.detail || egg.title || egg.description || '';
+}
+
+function eggBody(egg) {
+  if (!egg || typeof egg === 'string') return '';
+  const heading = eggHeading(egg);
+  if (egg.description && egg.description !== heading && egg.description !== egg.detail) {
+    return egg.description;
+  }
+  return '';
+}
+
 function getSourceBadge(source) {
   switch (source) {
     case 'cdn':
@@ -57,16 +79,12 @@ window.MovieSearchComponent = function() {
     window.preloadCDNData().then(() => {
       setLoaded(true);
       
-      // Get featured movies from theaters with post-credits or easter eggs
+      // Show all recent theater movies (eggs optional)
       const theatersData = window.getTheatersData();
       if (theatersData && theatersData.movies) {
         const featured = theatersData.movies.filter(m => {
-          // Only show movies from theaters tier (released in last 60 days)
           const currentYear = new Date().getFullYear();
-          const isRecent = m.year >= currentYear - 1 || m.year === currentYear;
-          const hasContent = (m.postCredits && m.postCredits.hasScene) || 
-                            (m.easterEggs && Array.isArray(m.easterEggs) && m.easterEggs.length > 0);
-          return isRecent && hasContent;
+          return m.year >= currentYear - 1;
         });
         setFeaturedMovies(featured);
       }
@@ -112,13 +130,13 @@ window.MovieSearchComponent = function() {
         {showClickHint && <span style={{ marginLeft: '8px', fontSize: '0.7em', color: '#718096' }}>→ Click to view</span>}
       </h3>
       {m.posterPath && (
-        <img src={m.posterPath} alt={m.title} style={{ maxWidth: 200, marginBottom: '12px' }} />
+        <img src={posterSrc(m.posterPath)} alt={m.title} style={{ maxWidth: 200, marginBottom: '12px' }} />
       )}
       
       {m.postCredits && m.postCredits.hasScene && (
         <div style={{ marginBottom: '12px' }}>
           <span className="badge green">🎬 {m.postCredits.sceneCount} Post-Credit Scene{m.postCredits.sceneCount > 1 ? 's' : ''}</span>
-          {m.postCredits.worthStaying && (
+          {isWorthStaying(m.postCredits.worthStaying) && (
             <div style={{ marginTop: '8px', color: '#d69e2e', fontWeight: '600' }}>
               ⭐ Worth staying for!
             </div>
@@ -144,7 +162,12 @@ window.MovieSearchComponent = function() {
                 borderLeft: '4px solid #667eea',
                 listStyle: 'none'
               }}>
-                <strong style={{ color: '#2d3748' }}>{egg.detail || egg}</strong>
+                <strong style={{ color: '#2d3748' }}>{eggHeading(egg)}</strong>
+                {eggBody(egg) && (
+                  <div style={{ marginTop: '4px', color: '#4a5568', fontSize: '14px' }}>
+                    {eggBody(egg)}
+                  </div>
+                )}
                 {egg.significance && (
                   <div style={{ marginTop: '4px', color: '#718096', fontSize: '14px' }}>
                     {egg.significance}
@@ -252,14 +275,14 @@ window.MovieSearchComponent = function() {
           {featuredMovies.length > 0 ? (
             <>
               <h2 style={{ marginTop: '24px', marginBottom: '16px', color: '#2d3748' }}>
-                🎬 Now in Theaters with Post-Credits or Easter Eggs ({featuredMovies.length})
+                🎬 Now in Theaters ({featuredMovies.length})
               </h2>
               {featuredMovies.map(m => renderMovieCard(m, true))}
             </>
           ) : (
             <div style={{ textAlign: 'center', padding: '40px', color: '#718096' }}>
               <div style={{ fontSize: '48px', marginBottom: '16px' }}>🎬</div>
-              <p style={{ fontSize: '18px', marginBottom: '8px' }}>No movies in theaters with easter eggs yet</p>
+              <p style={{ fontSize: '18px', marginBottom: '8px' }}>No movies in theaters yet</p>
               <p style={{ fontSize: '14px' }}>Search for any movie to discover post-credits scenes and easter eggs!</p>
             </div>
           )}
@@ -325,7 +348,7 @@ window.MovieSearchComponent = function() {
               {movie.title} ({movie.year})
             </h2>
           {movie.posterPath && (
-            <img src={movie.posterPath} alt={movie.title} style={{ maxWidth: 240 }} />
+            <img src={posterSrc(movie.posterPath)} alt={movie.title} style={{ maxWidth: 240 }} />
           )}
 
           {/* Show processing state if analyzing */}
@@ -354,7 +377,7 @@ window.MovieSearchComponent = function() {
                 <div>
                   <h3>🎬 Post-Credits Scenes</h3>
                   <p>Count: {movie.postCredits.sceneCount}</p>
-                  {movie.postCredits.worthStaying && (
+                  {isWorthStaying(movie.postCredits.worthStaying) && (
                     <p className="highlight">⭐ Worth staying for!</p>
                   )}
                   {movie.postCredits.spoilerFreeHint && (
@@ -376,7 +399,7 @@ window.MovieSearchComponent = function() {
               <ul>
                 {movie.easterEggs.map((egg, i) => (
                   <li key={i}>
-                    <strong>{egg.detail || egg}</strong>
+                    <strong>{eggHeading(egg)}</strong>
                     {egg.significance && <span> — {egg.significance}</span>}
                   </li>
                 ))}

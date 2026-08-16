@@ -167,8 +167,9 @@
   <script type="text/babel">
     // Ensure config is loaded before rendering
     if (!window.CDN_BASE || !window.API_BASE) {
-      console.error('Config not loaded! Make sure config.js exists.');
-      console.log('Copy config.example.js to config.js and update with your values');
+      window.API_BASE = window.location.origin;
+      window.CDN_BASE = window.location.origin + '/movies/';
+      console.warn('config.js missing; defaulting to same-origin API/CDN');
     }
     
     const root = ReactDOM.createRoot(document.getElementById('root'));

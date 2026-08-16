@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from src.config import settings
 from src.models import RedditInsights, PostCreditsScene, EasterEgg
 from src.imdb_scraper import IMDbScraper
+from src.schema_compat import worth_staying_to_bool
 
 
 class RedditScraper:
@@ -142,7 +143,9 @@ class RedditScraper:
     ) -> Optional[RedditInsights]:
         """Use OpenAI to analyze Reddit posts for insights"""
 
-        if not posts:
+        if not posts and not (
+            imdb_data and (imdb_data.get("trivia") or imdb_data.get("goofs"))
+        ):
             return None
 
         # Prepare context from Reddit posts
@@ -238,7 +241,9 @@ Guidelines:
                 has_scene=post_credits_data.get("has_scene", False),
                 scene_count=post_credits_data.get("scene_count", 0),
                 descriptions=post_credits_data.get("descriptions", []),
-                worth_staying=post_credits_data.get("worth_staying"),
+                worth_staying=worth_staying_to_bool(
+                    post_credits_data.get("worth_staying")
+                ),
                 spoiler_free_hint=post_credits_data.get("spoiler_free_hint"),
             )
 
@@ -265,6 +270,111 @@ Guidelines:
             print(f"Error analyzing with GPT: {e}")
             return None
 
+    async def analyze_published_knowledge(
+        self, movie_title: str, year: Optional[int] = None
+    ) -> Optional[RedditInsights]:
+        """Extract ONLY widely published post-credits / easter-egg facts.
+
+        Used when Reddit is empty and IMDb is blocked (HTTP 202 WAF).
+        If unsure, return has_scene false and empty eggs. Never invent.
+        """
+        year_bit = f" ({year})" if year else ""
+        system_msg = (
+            "You extract widely published, well-known post-credits scenes "
+            "and easter eggs for movies. Respond with valid JSON only. "
+            "Never invent or guess. If you are not confident the fact is "
+            "widely published, omit it."
+        )
+        prompt = (
+            f'Widely published post-credits / easter-egg facts for '
+            f'"{movie_title}"{year_bit}.\n\n'
+            "Use ONLY facts that are commonly reported by major outlets "
+            "(studio, official social, widely cited reviews). "
+            "Do not invent scenes, cameos, or eggs. "
+            "If you are unsure, set has_scene to false and return an "
+            "empty easter_eggs array.\n\n"
+            "JSON shape:\n"
+            "{\n"
+            '  "post_credits": {\n'
+            '    "has_scene": false,\n'
+            '    "scene_count": 0,\n'
+            '    "descriptions": [],\n'
+            '    "worth_staying": null,\n'
+            '    "spoiler_free_hint": null\n'
+            "  },\n"
+            '  "easter_eggs": [\n'
+            "    {\n"
+            '      "detail": "widely published easter egg",\n'
+            '      "significance": "what it references",\n'
+            '      "confidence": "high/medium/low",\n'
+            '      "source_url": null\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+        )
+
+        try:
+            print(
+                f"  📚 Published-knowledge fallback for: "
+                f"{movie_title}{year_bit}"
+            )
+            response = await self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0,
+            )
+
+            import json
+
+            result = json.loads(response.choices[0].message.content)
+            post_credits_data = result.get("post_credits", {})
+            post_credits = PostCreditsScene(
+                has_scene=bool(post_credits_data.get("has_scene", False)),
+                scene_count=int(post_credits_data.get("scene_count", 0) or 0),
+                descriptions=post_credits_data.get("descriptions") or [],
+                worth_staying=worth_staying_to_bool(
+                    post_credits_data.get("worth_staying")
+                ),
+                spoiler_free_hint=post_credits_data.get("spoiler_free_hint"),
+            )
+            if not post_credits.has_scene:
+                post_credits.scene_count = 0
+                post_credits.descriptions = []
+
+            easter_eggs = []
+            for egg in result.get("easter_eggs") or []:
+                detail = (egg.get("detail") or "").strip()
+                if not detail:
+                    continue
+                easter_eggs.append(
+                    EasterEgg(
+                        detail=detail,
+                        significance=egg.get("significance") or "",
+                        confidence=egg.get("confidence") or "medium",
+                        source_url=egg.get("source_url"),
+                    )
+                )
+
+            insights = RedditInsights(
+                easter_eggs=easter_eggs,
+                post_credits=post_credits,
+                reddit_discussion_count=0,
+                source_urls=[],
+            )
+            print(
+                f"  ✓ Published knowledge: has_scene="
+                f"{post_credits.has_scene}, eggs={len(easter_eggs)}"
+            )
+            return insights
+
+        except Exception as e:
+            print(f"  ⚠️  Published-knowledge fallback failed: {e}")
+            return None
+
     async def scrape_movie_insights(
         self, movie_title: str, year: Optional[int] = None, imdb_id: Optional[str] = None
     ) -> Optional[RedditInsights]:
@@ -287,7 +397,8 @@ Guidelines:
 
         if not posts and (not imdb_data or imdb_data['total_items'] == 0):
             print("  ⚠️  No Reddit posts or IMDb data found")
-            return None
+            print("  📚 Falling back to published-knowledge analysis...")
+            return await self.analyze_published_knowledge(movie_title, year)
 
         print("Analyzing with OpenAI...")
         insights = await self.analyze_with_gpt(movie_title, posts, imdb_data)

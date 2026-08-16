@@ -1,18 +1,22 @@
-// Storage Configuration Template
-// 
-// Copy this file to config.js and update with your values:
-// cp frontend/config.example.js frontend/config.js
+// Same-origin config (copy to config.js if needed).
+// Nginx proxies API, MinIO JSON, and TMDB images on this origin.
+window.API_BASE = window.location.origin;
+window.CDN_BASE = window.location.origin + '/movies/';
 
-// LOCAL DEVELOPMENT (MinIO):
-window.CDN_BASE = 'http://localhost:9000/movies/';
-window.API_BASE = 'http://localhost:8000';
+window.rewritePoster = function (url) {
+  if (!url) return url;
+  var prefixes = [
+    'https://image.tmdb.org/',
+    'http://image.tmdb.org/',
+  ];
+  for (var i = 0; i < prefixes.length; i++) {
+    if (url.indexOf(prefixes[i]) === 0) {
+      return window.location.origin + '/tmdb-image/' + url.slice(prefixes[i].length);
+    }
+  }
+  return url;
+};
 
-// KUBERNETES DEPLOYMENT:
-// Update with your actual node IP or Tailscale IP
-// window.CDN_BASE = 'http://YOUR_NODE_IP:30901/movies/';
-// window.API_BASE = 'http://YOUR_NODE_IP:30800';
-
-// PRODUCTION (Update with your S3-compatible storage URL):
-// window.CDN_BASE = 'https://your-cdn-url.com/movies/';
-// window.API_BASE = 'https://your-api.com';
-
+// LOCAL DEVELOPMENT without nginx (API + MinIO on other ports):
+// window.CDN_BASE = 'http://localhost:9000/movies/';
+// window.API_BASE = 'http://localhost:8000';

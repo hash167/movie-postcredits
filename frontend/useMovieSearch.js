@@ -55,7 +55,14 @@ window.useMovieSearch = function(movieTitle, year) {
   const [pollCount, setPollCount] = useState(0);
 
   useEffect(() => {
-    if (!movieTitle) return;
+    if (!movieTitle) {
+      setMovie(null);
+      setError(null);
+      setSource(null);
+      setLoading(false);
+      setPollCount(0);
+      return;
+    }
     setLoading(true);
     setError(null);
     setPollCount(0);

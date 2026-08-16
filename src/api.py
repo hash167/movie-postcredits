@@ -14,16 +14,17 @@ from src.database import DatabaseManager
 from src.tmdb_client import TMDBClient
 from src.reddit_scraper import RedditScraper
 from src.sync_job import sync_job
+from src.schema_compat import normalize_easter_eggs, worth_staying_to_bool
 
 
 def _parse_easter_eggs(easter_eggs):
     """Parse easter eggs if they're a JSON string"""
     if isinstance(easter_eggs, str) and easter_eggs:
         try:
-            return json.loads(easter_eggs)
+            easter_eggs = json.loads(easter_eggs)
         except json.JSONDecodeError:
             return []
-    return easter_eggs if isinstance(easter_eggs, list) else []
+    return normalize_easter_eggs(easter_eggs)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -72,6 +73,12 @@ async def shutdown():
     await db.close()
 
 
+@app.get("/health")
+def health():
+    """Liveness probe used by Docker and Kubernetes"""
+    return {"status": "ok"}
+
+
 @app.get("/")
 def read_root():
     """Root endpoint"""
@@ -115,7 +122,9 @@ async def search_movie(request: SearchRequest):
                 {
                     "hasScene": cached.get("has_scene", False),
                     "sceneCount": cached.get("scene_count", 0),
-                    "worthStaying": cached.get("worth_staying"),
+                    "worthStaying": worth_staying_to_bool(
+                        cached.get("worth_staying")
+                    ),
                     "spoilerFreeHint": cached.get("spoiler_free_hint"),
                     "confidence": cached.get("source_confidence", "medium"),
                 }
@@ -247,7 +256,7 @@ async def get_movie(movie_id: int):
             "sceneCount": movie.get("scene_count", 0),
             "midCredits": movie.get("mid_credits"),
             "postCredits": movie.get("post_credits_desc"),
-            "worthStaying": movie.get("worth_staying"),
+            "worthStaying": worth_staying_to_bool(movie.get("worth_staying")),
             "spoilerFreeHint": movie.get("spoiler_free_hint"),
             "confidence": movie.get("source_confidence", "medium"),
         }
@@ -289,13 +298,15 @@ async def get_movies_by_tier(tier: str):
                     {
                         "hasScene": m.get("has_scene", False),
                         "sceneCount": m.get("scene_count", 0),
-                        "worthStaying": m.get("worth_staying"),
+                        "worthStaying": worth_staying_to_bool(
+                            m.get("worth_staying")
+                        ),
                         "spoilerFreeHint": m.get("spoiler_free_hint"),
                     }
                     if m.get("has_scene") is not None
                     else None
                 ),
-                "easterEggs": m.get("easter_eggs", []),
+                "easterEggs": _parse_easter_eggs(m.get("easter_eggs", [])),
             }
             for m in movies
         ],

@@ -90,6 +90,17 @@ CREATE TABLE reddit_insights (
     UNIQUE(movie_id)
 );
 
+-- Batch logs (nightly theaters-daily CronJob)
+CREATE TABLE IF NOT EXISTS batch_logs (
+    id SERIAL PRIMARY KEY,
+    tier VARCHAR(50),
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP,
+    movies_processed INTEGER DEFAULT 0,
+    movies_failed INTEGER DEFAULT 0,
+    status VARCHAR(50) DEFAULT 'running'
+);
+
 -- Create indexes for better performance
 CREATE INDEX idx_movies_title ON movies(title);
 CREATE INDEX idx_movies_year ON movies(year);
@@ -97,6 +108,45 @@ CREATE INDEX idx_movies_tier ON movies(tier);
 CREATE INDEX idx_post_credits_movie_id ON post_credits(movie_id);
 CREATE INDEX idx_easter_eggs_movie_id ON easter_eggs(movie_id);
 CREATE INDEX idx_reddit_insights_movie_id ON reddit_insights(movie_id);
+CREATE INDEX IF NOT EXISTS idx_batch_logs_tier ON batch_logs(tier);
+
+-- Complete movie view using LIVE column names only
+CREATE OR REPLACE VIEW movies_complete AS
+SELECT
+    m.id,
+    m.title,
+    m.year,
+    m.release_date,
+    m.runtime_minutes,
+    m.poster_path,
+    m.overview,
+    m.vote_average,
+    m.popularity,
+    m.tier,
+    m.imdb_id,
+    m.updated_at,
+    pc.has_scene,
+    pc.scene_count,
+    pc.mid_credits,
+    pc.post_credits AS post_credits_desc,
+    pc.worth_staying,
+    pc.spoiler_free_hint,
+    pc.source_confidence,
+    ri.reddit_discussion_count,
+    ri.scraped_at AS reddit_scraped_at,
+    (
+        SELECT json_agg(json_build_object(
+            'title', ee.title,
+            'description', ee.description,
+            'significance', ee.significance,
+            'timestamp_minutes', ee.timestamp_minutes
+        ))
+        FROM easter_eggs ee
+        WHERE ee.movie_id = m.id
+    ) AS easter_eggs
+FROM movies m
+LEFT JOIN post_credits pc ON m.id = pc.movie_id
+LEFT JOIN reddit_insights ri ON m.id = ri.movie_id;
 
 -- Verify tables were created
 \dt
@@ -108,7 +158,9 @@ SELECT 'post_credits', COUNT(*) FROM post_credits
 UNION ALL
 SELECT 'easter_eggs', COUNT(*) FROM easter_eggs
 UNION ALL
-SELECT 'reddit_insights', COUNT(*) FROM reddit_insights;
+SELECT 'reddit_insights', COUNT(*) FROM reddit_insights
+UNION ALL
+SELECT 'batch_logs', COUNT(*) FROM batch_logs;
 
 EOF
 
@@ -123,6 +175,8 @@ if [ $? -eq 0 ]; then
     echo "  - post_credits"
     echo "  - easter_eggs"
     echo "  - reddit_insights"
+    echo "  - batch_logs"
+    echo "  - movies_complete (view)"
     echo ""
     echo -e "${YELLOW}Next steps:${NC}"
     echo "  1. Restart your API pods:"

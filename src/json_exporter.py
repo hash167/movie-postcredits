@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import List, Dict
 from src.database import DatabaseManager
 from src.config import settings
+from src.schema_compat import normalize_easter_eggs, worth_staying_to_bool
 
 
 class JSONExporter:
@@ -38,7 +39,7 @@ class JSONExporter:
                 "sceneCount": movie.get("scene_count", 0),
                 "midCredits": movie.get("mid_credits"),
                 "postCredits": movie.get("post_credits_desc"),
-                "worthStaying": movie.get("worth_staying"),
+                "worthStaying": worth_staying_to_bool(movie.get("worth_staying")),
                 "spoilerFreeHint": movie.get("spoiler_free_hint"),
                 "confidence": movie.get("source_confidence", "medium"),
             }
@@ -50,6 +51,7 @@ class JSONExporter:
                 easter_eggs = json.loads(easter_eggs)
             except json.JSONDecodeError:
                 easter_eggs = []
+        easter_eggs = normalize_easter_eggs(easter_eggs)
 
         return {
             "id": movie["id"],
@@ -146,7 +148,9 @@ class JSONExporter:
                         "title": movie["title"],
                         "year": movie["year"],
                         "sceneCount": movie["scene_count"],
-                        "worthStaying": movie["worth_staying"],
+                        "worthStaying": worth_staying_to_bool(
+                            movie["worth_staying"]
+                        ),
                     }
                 )
 
@@ -185,8 +189,8 @@ class JSONExporter:
 
                 # Get easter eggs for this movie
                 query = (
-                    "SELECT detail, significance, confidence, "
-                    "source_url FROM easter_eggs WHERE movie_id = $1"
+                    "SELECT title, description, significance, "
+                    "timestamp_minutes FROM easter_eggs WHERE movie_id = $1"
                 )
                 eggs = await conn.fetch(query, movie_dict["id"])
 
@@ -197,7 +201,9 @@ class JSONExporter:
                         "year": movie_dict["year"],
                         "tier": movie_dict["tier"],
                         "posterPath": movie_dict["poster_path"],
-                        "easterEggs": [dict(egg) for egg in eggs],
+                        "easterEggs": normalize_easter_eggs(
+                            [dict(egg) for egg in eggs]
+                        ),
                     }
                 )
 

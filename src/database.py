@@ -3,6 +3,12 @@ from typing import List, Dict, Optional
 from datetime import datetime
 from src.config import settings
 from src.models import EnhancedMovie
+from src.schema_compat import (
+    BATCH_LOGS_TABLE_SQL,
+    MOVIES_COMPLETE_VIEW_SQL,
+    egg_to_live_columns,
+    worth_staying_to_db,
+)
 
 
 class DatabaseManager:
@@ -15,10 +21,35 @@ class DatabaseManager:
             min_size=2,
             max_size=10,
         )
+        await self.ensure_schema()
 
     async def close(self):
         if self.pool:
             await self.pool.close()
+
+    async def ensure_schema(self):
+        """Create batch_logs and movies_complete if missing.
+
+        A missing batch_logs table previously killed the nightly
+        theaters-daily CronJob. The view must use live column names
+        (reddit_discussion_count, easter_eggs.title/description).
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute(BATCH_LOGS_TABLE_SQL)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_batch_logs_tier "
+                "ON batch_logs(tier)"
+            )
+            movies_exist = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'movies'
+                )
+                """
+            )
+            if movies_exist:
+                await conn.execute(MOVIES_COMPLETE_VIEW_SQL)
 
     async def upsert_movie(self, movie: EnhancedMovie):
         async with self.pool.acquire() as conn:
@@ -84,44 +115,46 @@ class DatabaseManager:
                         pc.scene_count,
                         mid_cred,
                         post_cred,
-                        pc.worth_staying,
+                        worth_staying_to_db(pc.worth_staying),
                         pc.spoiler_free_hint,
                         "medium",
                     )
-                    # Remove old easter eggs
                     await conn.execute(
                         "DELETE FROM easter_eggs WHERE movie_id=$1", movie.id
                     )
                     for egg in movie.reddit_insights.easter_eggs:
+                        mapped = egg_to_live_columns(
+                            egg.detail, egg.significance
+                        )
+                        if not mapped["title"] and not mapped["description"]:
+                            continue
                         await conn.execute(
                             """
                             INSERT INTO easter_eggs (
-                                movie_id, detail, significance,
-                                confidence, source_url
+                                movie_id, title, description,
+                                timestamp_minutes, significance
                             ) VALUES ($1, $2, $3, $4, $5)
                             """,
                             movie.id,
-                            egg.detail,
-                            egg.significance,
-                            egg.confidence,
-                            egg.source_url,
+                            mapped["title"],
+                            mapped["description"],
+                            mapped["timestamp_minutes"],
+                            mapped["significance"],
                         )
                     disc_count = movie.reddit_insights.reddit_discussion_count
                     await conn.execute(
                         """
                         INSERT INTO reddit_insights (
-                            movie_id, discussion_count, source_urls,
-                            scraped_at
+                            movie_id, reddit_discussion_count, scraped_at
                         )
-                        VALUES ($1, $2, $3, $4)
+                        VALUES ($1, $2, $3)
                         ON CONFLICT (movie_id) DO UPDATE SET
-                            discussion_count=EXCLUDED.discussion_count,
-                            source_urls=EXCLUDED.source_urls,
+                            reddit_discussion_count=
+                                EXCLUDED.reddit_discussion_count,
                             scraped_at=EXCLUDED.scraped_at
                         """,
                         movie.id,
                         disc_count,
-                        movie.reddit_insights.source_urls,
                         datetime.now(),
                     )
 

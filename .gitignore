@@ -8,9 +8,6 @@
 kubernetes/all-in-one.yaml
 kubernetes/cronjobs.yaml
 
-# Frontend config (has IPs)
-frontend/config.js
-
 # Python
 __pycache__/
 *.py[cod]

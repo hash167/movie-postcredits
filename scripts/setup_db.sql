@@ -1,4 +1,8 @@
 -- Database setup for Movie Post-Credits & Easter Eggs
+-- Matches the LIVE cluster schema (namespace movie-api).
+-- Do not reference easter_eggs.detail / confidence / source_url
+-- or reddit_insights.discussion_count / source_urls — those columns
+-- do not exist in production.
 
 -- Create movies table
 CREATE TABLE IF NOT EXISTS movies (
@@ -17,6 +21,7 @@ CREATE TABLE IF NOT EXISTS movies (
 );
 
 -- Create post_credits table
+-- worth_staying is VARCHAR in production ('yes' / 'no' / NULL)
 CREATE TABLE IF NOT EXISTS post_credits (
     id SERIAL PRIMARY KEY,
     movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE UNIQUE,
@@ -24,31 +29,31 @@ CREATE TABLE IF NOT EXISTS post_credits (
     scene_count INTEGER DEFAULT 0,
     mid_credits TEXT,
     post_credits TEXT,
-    worth_staying BOOLEAN,
+    worth_staying VARCHAR(50),
     spoiler_free_hint TEXT,
     source_confidence VARCHAR(50) DEFAULT 'medium'
 );
 
--- Create easter_eggs table
+-- Create easter_eggs table (live columns)
 CREATE TABLE IF NOT EXISTS easter_eggs (
     id SERIAL PRIMARY KEY,
     movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
-    detail TEXT NOT NULL,
-    significance TEXT,
-    confidence VARCHAR(50),
-    source_url TEXT
+    title VARCHAR(500),
+    description TEXT,
+    timestamp_minutes INTEGER,
+    significance VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create reddit_insights table
+-- Create reddit_insights table (live columns)
 CREATE TABLE IF NOT EXISTS reddit_insights (
     id SERIAL PRIMARY KEY,
     movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE UNIQUE,
-    discussion_count INTEGER DEFAULT 0,
-    source_urls TEXT[],
+    reddit_discussion_count INTEGER DEFAULT 0,
     scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create batch_logs table
+-- Create batch_logs table (nightly CronJob writes here)
 CREATE TABLE IF NOT EXISTS batch_logs (
     id SERIAL PRIMARY KEY,
     tier VARCHAR(50),
@@ -59,9 +64,9 @@ CREATE TABLE IF NOT EXISTS batch_logs (
     status VARCHAR(50) DEFAULT 'running'
 );
 
--- Create view for complete movie data
+-- Create view for complete movie data using LIVE column names
 CREATE OR REPLACE VIEW movies_complete AS
-SELECT 
+SELECT
     m.id,
     m.title,
     m.year,
@@ -77,19 +82,22 @@ SELECT
     pc.has_scene,
     pc.scene_count,
     pc.mid_credits,
-    pc.post_credits as post_credits_desc,
+    pc.post_credits AS post_credits_desc,
     pc.worth_staying,
     pc.spoiler_free_hint,
     pc.source_confidence,
-    ri.discussion_count as reddit_discussion_count,
-    ri.source_urls as reddit_source_urls,
-    ri.scraped_at as reddit_scraped_at,
-    (SELECT json_agg(json_build_object(
-        'detail', ee.detail,
-        'significance', ee.significance,
-        'confidence', ee.confidence,
-        'source_url', ee.source_url
-    )) FROM easter_eggs ee WHERE ee.movie_id = m.id) as easter_eggs
+    ri.reddit_discussion_count,
+    ri.scraped_at AS reddit_scraped_at,
+    (
+        SELECT json_agg(json_build_object(
+            'title', ee.title,
+            'description', ee.description,
+            'significance', ee.significance,
+            'timestamp_minutes', ee.timestamp_minutes
+        ))
+        FROM easter_eggs ee
+        WHERE ee.movie_id = m.id
+    ) AS easter_eggs
 FROM movies m
 LEFT JOIN post_credits pc ON m.id = pc.movie_id
 LEFT JOIN reddit_insights ri ON m.id = ri.movie_id;
@@ -113,6 +121,6 @@ END;
 $$ language 'plpgsql';
 
 -- Create trigger for updated_at
+DROP TRIGGER IF EXISTS update_movies_updated_at ON movies;
 CREATE TRIGGER update_movies_updated_at BEFORE UPDATE ON movies
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
