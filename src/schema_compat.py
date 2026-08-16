@@ -61,19 +61,20 @@ def worth_staying_to_bool(value: Any) -> Optional[bool]:
 
 
 def normalize_easter_egg(egg: Any) -> Any:
-    """Expose title/description and a detail alias for the existing frontend."""
+    """Map live title/description → {detail, significance} for the frontend."""
+    if isinstance(egg, str):
+        return {"detail": egg, "significance": None}
     if not isinstance(egg, dict):
         return egg
-    title = egg.get("title") or ""
     description = egg.get("description") or ""
-    detail = egg.get("detail") or description or title
+    title = egg.get("title") or ""
+    # Live DB has description, not detail. Prefer description.
+    detail = description or title or egg.get("detail") or ""
     return {
-        "title": title or detail,
-        "description": description or detail,
         "detail": detail,
         "significance": egg.get("significance"),
-        "timestampMinutes": egg.get("timestamp_minutes")
-        or egg.get("timestampMinutes"),
+        "title": title or None,
+        "description": description or None,
     }
 
 
@@ -115,6 +116,7 @@ SELECT
         SELECT json_agg(json_build_object(
             'title', ee.title,
             'description', ee.description,
+            'detail', COALESCE(ee.description, ee.title),
             'significance', ee.significance,
             'timestamp_minutes', ee.timestamp_minutes
         ))

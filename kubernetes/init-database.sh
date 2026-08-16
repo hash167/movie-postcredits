@@ -138,6 +138,7 @@ SELECT
         SELECT json_agg(json_build_object(
             'title', ee.title,
             'description', ee.description,
+            'detail', COALESCE(ee.description, ee.title),
             'significance', ee.significance,
             'timestamp_minutes', ee.timestamp_minutes
         ))

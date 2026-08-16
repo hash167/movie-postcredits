@@ -187,7 +187,8 @@ class JSONExporter:
             for row in rows:
                 movie_dict = dict(row)
 
-                # Get easter eggs for this movie
+                # Live easter_eggs columns: title, description, significance.
+                # Never SELECT detail / confidence / source_url — they do not exist.
                 query = (
                     "SELECT title, description, significance, "
                     "timestamp_minutes FROM easter_eggs WHERE movie_id = $1"
@@ -201,9 +202,17 @@ class JSONExporter:
                         "year": movie_dict["year"],
                         "tier": movie_dict["tier"],
                         "posterPath": movie_dict["poster_path"],
-                        "easterEggs": normalize_easter_eggs(
-                            [dict(egg) for egg in eggs]
-                        ),
+                        "easterEggs": [
+                            {
+                                "detail": (
+                                    egg["description"]
+                                    or egg["title"]
+                                    or ""
+                                ),
+                                "significance": egg["significance"],
+                            }
+                            for egg in eggs
+                        ],
                     }
                 )
 
