@@ -15,12 +15,19 @@ class UpsertSqlTests(unittest.TestCase):
         self.assertIn("reddit_discussion_count", src)
         self.assertIn("worth_staying_to_db", src)
         self.assertIn("async def ensure_schema", src)
-        self.assertIn("CREATE TABLE IF NOT EXISTS batch_logs", src)
+        self.assertIn("BATCH_LOGS_TABLE_SQL", src)
+        self.assertIn("ensure_schema", src)
         # Must not write columns that do not exist on the live cluster
-        self.assertNotIn("egg.detail,", src)
+        self.assertNotIn("movie_id, detail", src)
+        self.assertNotIn("confidence, source_url", src)
         self.assertNotIn("discussion_count, source_urls", src)
-        self.assertNotIn("INSERT INTO reddit_insights (\n"
-                         "                            movie_id, discussion_count", src)
+        self.assertNotIn(
+            "movie_id, discussion_count, source_urls", src
+        )
+
+    def test_batch_logs_sql_constant(self):
+        from src.schema_compat import BATCH_LOGS_TABLE_SQL
+        self.assertIn("CREATE TABLE IF NOT EXISTS batch_logs", BATCH_LOGS_TABLE_SQL)
 
 
 if __name__ == "__main__":

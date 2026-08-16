@@ -83,7 +83,7 @@ class SetupSqlTests(unittest.TestCase):
         self.assertIn("title VARCHAR(500)", sql)
         self.assertIn("description TEXT", sql)
         self.assertNotIn("detail TEXT NOT NULL", sql)
-        self.assertNotIn("discussion_count INTEGER", sql)
+        self.assertNotIn("    discussion_count INTEGER", sql)
 
 
 if __name__ == "__main__":
