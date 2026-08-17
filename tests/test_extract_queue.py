@@ -104,6 +104,18 @@ class ClaimSqlTests(unittest.TestCase):
         self.assertIn("attempts < 3", REQUEUE_STALE_RUNNING_SQL)
         self.assertIn("attempts >= 3", FAIL_STALE_RUNNING_SQL)
 
+    def test_worker_deployment_is_two_replicas(self):
+        with open("kubernetes/extract-worker.example.yaml", encoding="utf-8") as fh:
+            manifest = fh.read()
+        self.assertIn("replicas: 2", manifest)
+        self.assertIn("FOR UPDATE SKIP LOCKED", manifest)
+        self.assertIn("one Ollama host so CPU will contend", manifest)
+        with open("kubernetes/all-in-one.example.yaml", encoding="utf-8") as fh:
+            all_in_one = fh.read()
+        self.assertIn("name: movie-extract-worker", all_in_one)
+        worker = all_in_one.split("name: movie-extract-worker", 1)[1]
+        self.assertIn("replicas: 2", worker)
+
     def test_api_does_not_create_task_extract(self):
         with open("src/api.py", encoding="utf-8") as fh:
             src = fh.read()

@@ -528,9 +528,10 @@ spec:
 
 ---
 ##############################################################################
-# EXTRACT WORKER (1 replica) — python -m src.extract_worker
-# Claims extract_jobs with FOR UPDATE SKIP LOCKED. Do not scale above 1
-# unless you want parallel Ollama; SKIP LOCKED is safe either way.
+# EXTRACT WORKER (2 replicas) — python -m src.extract_worker
+# Competing-consumer group on the same extract_jobs table (no Kafka).
+# Both claim with SELECT … FOR UPDATE SKIP LOCKED.
+# Both share one Ollama host so CPU will contend.
 ##############################################################################
 
 apiVersion: apps/v1
@@ -539,7 +540,7 @@ metadata:
   name: movie-extract-worker
   namespace: movie-api
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: movie-extract-worker

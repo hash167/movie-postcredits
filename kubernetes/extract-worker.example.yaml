@@ -1,9 +1,11 @@
-# Extract worker (1 replica). Copy and set the image:
+# Extract worker (2 replicas). Copy and set the image:
 #   kubectl apply -f kubernetes/extract-worker.yaml
 #
-# Claims uncached insight jobs from Postgres:
+# Competing-consumer group on the same extract_jobs table (no Kafka).
+# Both pods claim with SELECT … FOR UPDATE SKIP LOCKED.
+# Both share one Ollama host so CPU will contend.
 #   python -m src.extract_worker
-# FOR UPDATE SKIP LOCKED; stale running > 10 minutes is re-queued.
+# Stale running > 10 minutes is re-queued.
 
 apiVersion: apps/v1
 kind: Deployment
@@ -11,7 +13,7 @@ metadata:
   name: movie-extract-worker
   namespace: movie-api
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: movie-extract-worker

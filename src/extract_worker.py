@@ -1,5 +1,8 @@
 """Claim extract_jobs with FOR UPDATE SKIP LOCKED and run MovieInsights.
 
+Competing consumers (k8s replicas: 2) share this table — no Kafka.
+Both share one Ollama host so CPU will contend.
+
 Lock is only for the claim txn; 10 min > Ollama 420s so a live job is
 not stolen; crash leaves status=running until timeout.
 """
