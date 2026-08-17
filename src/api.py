@@ -14,6 +14,7 @@ from src.database import DatabaseManager
 from src.tmdb_client import TMDBClient
 from src.sync_job import sync_job
 from src.schema_compat import normalize_easter_eggs, worth_staying_to_bool
+from src.get_search import get_search_list
 
 
 def _parse_easter_eggs(easter_eggs):
@@ -85,11 +86,24 @@ def read_root():
         "version": "2.0.0",
         "endpoints": {
             "search": "POST /search",
+            "search_list": "GET /search",
             "movie": "GET /movie/{movie_id}",
             "movies_by_tier": "GET /movies/tier/{tier}",
             "stats": "GET /stats",
         },
     }
+
+
+@app.get("/search")
+async def search_movies_get(query: str = "", year: Optional[int] = None):
+    """Typeahead list. Cached + single-flight. Does not enqueue extract."""
+    return await get_search_list(
+        query,
+        year,
+        tmdb.search_movies,
+        db.search_movies_ilike,
+        tmdb.image_base,
+    )
 
 
 @app.post("/search")

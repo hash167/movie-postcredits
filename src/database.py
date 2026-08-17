@@ -190,6 +190,39 @@ class DatabaseManager:
             )
             return dict(row) if row else None
 
+    async def search_movies_ilike(
+        self, query: str, year: Optional[int] = None, limit: int = 20
+    ) -> List[Dict]:
+        """Local title search when TMDB is down. GET /search only."""
+        pattern = f"%{query}%"
+        async with self.pool.acquire() as conn:
+            if year is not None:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, title, year, poster_path, overview
+                    FROM movies
+                    WHERE title ILIKE $1 AND year = $2
+                    ORDER BY popularity DESC NULLS LAST
+                    LIMIT $3
+                    """,
+                    pattern,
+                    year,
+                    limit,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, title, year, poster_path, overview
+                    FROM movies
+                    WHERE title ILIKE $1
+                    ORDER BY popularity DESC NULLS LAST
+                    LIMIT $2
+                    """,
+                    pattern,
+                    limit,
+                )
+        return [dict(row) for row in rows]
+
     async def enqueue_extract_job(
         self, movie_id: int, title: str, year: Optional[int]
     ) -> str:

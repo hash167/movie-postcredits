@@ -68,9 +68,9 @@ class TMDBClient:
                     movies.extend(data["results"])
         return movies
 
-    async def search_movie(
-        self, query: str, year: Optional[int] = None
-    ) -> Optional[Dict]:
+    async def search_movies(
+        self, query: str, year: Optional[int] = None, limit: int = 20
+    ) -> List[Dict]:
         url = f"{self.base_url}/search/movie"
         params = {"api_key": self.api_key, "query": query, "language": "en-US"}
         if year:
@@ -79,7 +79,13 @@ class TMDBClient:
             response = await client.get(url, params=params)
             response.raise_for_status()
             data = response.json()
-            return data["results"][0] if data.get("results") else None
+        return (data.get("results") or [])[:limit]
+
+    async def search_movie(
+        self, query: str, year: Optional[int] = None
+    ) -> Optional[Dict]:
+        results = await self.search_movies(query, year, limit=1)
+        return results[0] if results else None
 
     async def get_movie_keywords(self, movie_id: int) -> List[Dict]:
         """Dedicated /movie/{id}/keywords call."""
