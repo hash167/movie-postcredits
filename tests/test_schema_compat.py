@@ -36,6 +36,17 @@ class SchemaCompatTests(unittest.TestCase):
         self.assertEqual(mapped["description"], long_detail)
         self.assertEqual(len(mapped["significance"]), 50)
 
+    def test_significance_truncated_to_50_before_insert(self):
+        """Live easter_eggs.significance is VARCHAR(50)."""
+        mapped = egg_to_live_columns(
+            "A mid-credits cameo.",
+            "This significance string is far longer than fifty characters and would fail INSERT",
+        )
+        self.assertEqual(len(mapped["significance"]), 50)
+        self.assertTrue(
+            mapped["significance"].startswith("This significance string")
+        )
+
     def test_worth_staying_db_values(self):
         self.assertEqual(worth_staying_to_db(True), "yes")
         self.assertEqual(worth_staying_to_db(False), "no")

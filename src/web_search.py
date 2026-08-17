@@ -57,6 +57,10 @@ def decode_ddg_url(href: str) -> Optional[str]:
     if not href:
         return None
     href = html_lib.unescape(href).strip()
+    if not href:
+        return None
+    if href.startswith("/l/"):
+        href = "https://duckduckgo.com" + href
     if href.startswith("//"):
         href = "https:" + href
     parsed = urlparse(href)
@@ -74,12 +78,25 @@ def decode_ddg_url(href: str) -> Optional[str]:
 
 
 def parse_ddg_result_urls(html_text: str, limit: int = MAX_RESULTS) -> List[str]:
-    """Extract unique result URLs from DuckDuckGo HTML search markup."""
-    soup = BeautifulSoup(html_text or "", "html.parser")
+    """Extract result URLs the way the live ConfigMap parser does.
+
+    DDG often emits <a class="result__a" href=""> (empty). A truthy list of
+    empty captures used to skip the fallback, so Slashfilm/etc links were
+    dropped. If the first findall has no non-empty href, run the fallback.
+    Skip empty captures when unwrapping.
+    """
+    html_text = html_text or ""
+    hrefs = re.findall(r'class="result__a"[^>]*href="([^"]*)"', html_text)
+    if not any(href.strip() for href in hrefs if href):
+        hrefs = re.findall(
+            r'href="(/l/\?[^"]+|https?://[^"]+)"', html_text
+        )
+
     urls = []
     seen = set()
-    for anchor in soup.select("a.result__a, a.result__url"):
-        href = anchor.get("href") or ""
+    for href in hrefs:
+        if not href:
+            continue
         url = decode_ddg_url(href)
         if not url or url in seen:
             continue
@@ -87,15 +104,6 @@ def parse_ddg_result_urls(html_text: str, limit: int = MAX_RESULTS) -> List[str]
         urls.append(url)
         if len(urls) >= limit:
             break
-    if not urls:
-        for match in re.finditer(r'uddg=([^&"\']+)', html_text or ""):
-            url = decode_ddg_url("https://duckduckgo.com/l/?uddg=" + match.group(1))
-            if not url or url in seen:
-                continue
-            seen.add(url)
-            urls.append(url)
-            if len(urls) >= limit:
-                break
     return urls
 
 

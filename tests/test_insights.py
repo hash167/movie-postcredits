@@ -92,6 +92,19 @@ class OllamaParseTests(unittest.TestCase):
         self.assertEqual(len(eggs), 1)
         self.assertEqual(eggs[0].detail, "Stan Lee cameo")
 
+    def test_eggs_from_payload_truncates_significance_to_50(self):
+        eggs = eggs_from_model_payload(
+            {
+                "easter_eggs": [
+                    {
+                        "detail": "Cameo",
+                        "significance": "x" * 80,
+                    }
+                ]
+            }
+        )
+        self.assertEqual(len(eggs[0].significance), 50)
+
 
 class MovieInsightsTests(unittest.IsolatedAsyncioTestCase):
     async def test_analyze_uses_tmdb_keywords_when_ollama_fails(self):
@@ -227,6 +240,15 @@ class MovieInsightsTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(eggs, [])
         self.assertEqual(urls, ["https://example.com/a"])
+
+
+class OllamaTimeoutTests(unittest.TestCase):
+    def test_chat_timeout_is_at_least_240s(self):
+        with open("src/insights.py", encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("timeout=240.0", src)
+        self.assertNotIn("timeout=120.0", src)
+        self.assertNotIn("timeout=180.0", src)
 
 
 class SourceRemovalTests(unittest.TestCase):

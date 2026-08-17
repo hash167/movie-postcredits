@@ -47,6 +47,26 @@ class WebSearchParseTests(unittest.TestCase):
             ],
         )
 
+    def test_empty_result_a_hrefs_run_fallback(self):
+        """Live DDG: result__a hrefs are empty, so fallback must run."""
+        html = """
+        <html><body>
+          <a class="result__a" href=""></a>
+          <a class="result__a" href=""></a>
+          <a class="result__a" href=""></a>
+          <a href="/l/?uddg=https%3A%2F%2Fwww.slashfilm.com%2Fevil-dead-burn-easter-eggs%2F">Slashfilm</a>
+          <a href="https://screenrant.com/evil-dead-burn-ending-explained/">ScreenRant</a>
+        </body></html>
+        """
+        urls = parse_ddg_result_urls(html, limit=5)
+        self.assertIn(
+            "https://www.slashfilm.com/evil-dead-burn-easter-eggs/", urls
+        )
+        self.assertIn(
+            "https://screenrant.com/evil-dead-burn-ending-explained/", urls
+        )
+        self.assertGreaterEqual(len(urls), 2)
+
     def test_html_to_text_strips_chrome(self):
         text = html_to_text(
             "<html><script>alert(1)</script><p>Cameo after the logo.</p></html>"

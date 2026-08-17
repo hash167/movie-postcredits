@@ -26,6 +26,7 @@ class UpsertSqlTests(unittest.TestCase):
         )
         self.assertIn("Do not wipe existing eggs", src)
         self.assertIn("if new_eggs:", src)
+        self.assertIn("significance[:50]", src)
 
     def test_batch_logs_sql_constant(self):
         from src.schema_compat import BATCH_LOGS_TABLE_SQL

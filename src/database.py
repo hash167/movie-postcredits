@@ -133,6 +133,10 @@ class DatabaseManager:
                         )
                         if not mapped["title"] and not mapped["description"]:
                             continue
+                        # Live easter_eggs.significance is VARCHAR(50).
+                        significance = mapped["significance"]
+                        if significance:
+                            significance = significance[:50]
                         await conn.execute(
                             """
                             INSERT INTO easter_eggs (
@@ -144,7 +148,7 @@ class DatabaseManager:
                             mapped["title"],
                             mapped["description"],
                             mapped["timestamp_minutes"],
-                            mapped["significance"],
+                            significance,
                         )
                     disc_count = movie.reddit_insights.reddit_discussion_count
                     await conn.execute(
