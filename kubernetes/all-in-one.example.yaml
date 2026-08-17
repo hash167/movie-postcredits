@@ -526,3 +526,43 @@ spec:
   selector:
     app: movie-frontend
 
+---
+##############################################################################
+# EXTRACT WORKER (1 replica) — python -m src.extract_worker
+# Claims extract_jobs with FOR UPDATE SKIP LOCKED. Do not scale above 1
+# unless you want parallel Ollama; SKIP LOCKED is safe either way.
+##############################################################################
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: movie-extract-worker
+  namespace: movie-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: movie-extract-worker
+  template:
+    metadata:
+      labels:
+        app: movie-extract-worker
+    spec:
+      containers:
+      - name: extract-worker
+        image: your-dockerhub-username/movie-api:latest
+        imagePullPolicy: Always
+        command: ["python", "-m", "src.extract_worker"]
+        envFrom:
+        - configMapRef:
+            name: movie-api-config
+        - secretRef:
+            name: movie-api-secrets
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+

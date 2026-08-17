@@ -12,7 +12,6 @@ import asyncio
 
 from src.database import DatabaseManager
 from src.tmdb_client import TMDBClient
-from src.insights import MovieInsights
 from src.sync_job import sync_job
 from src.schema_compat import normalize_easter_eggs, worth_staying_to_bool
 
@@ -49,7 +48,6 @@ app.add_middleware(
 # Initialize managers
 db = DatabaseManager()
 tmdb = TMDBClient()
-movie_insights = MovieInsights()
 
 
 class SearchRequest(BaseModel):
@@ -112,7 +110,17 @@ async def search_movie(request: SearchRequest):
     # Check if we have it in database
     cached = await db.get_movie_by_id(movie_id)
 
+    release_date = movie_data.get("release_date")
+    year = int(release_date[:4]) if release_date else None
+    poster = movie_data.get("poster_path")
+    poster_url = f"{tmdb.image_base}{poster}" if poster else None
+
     if cached:
+        eggs = _parse_easter_eggs(cached.get("easter_eggs", []))
+        if not eggs and not cached.get("has_scene"):
+            await db.enqueue_extract_job(
+                movie_id, cached["title"], cached.get("year") or year
+            )
         return {
             "id": cached["id"],
             "title": cached["title"],
@@ -131,88 +139,26 @@ async def search_movie(request: SearchRequest):
                 if cached.get("has_scene") is not None
                 else None
             ),
-            "easterEggs": _parse_easter_eggs(cached.get("easter_eggs", [])),
+            "easterEggs": eggs,
             "cached": True,
             "source": "database",
         }
 
-    # Not in database - trigger background scraping and save to DB
     from src.models import EnhancedMovie
-    
-    release_date = movie_data.get("release_date")
-    year = int(release_date[:4]) if release_date else None
 
-    poster = movie_data.get("poster_path")
-    poster_url = f"{tmdb.image_base}{poster}" if poster else None
-
-    # Create movie object and trigger processing in background
-    async def process_movie_background():
-        try:
-            print(f"\n{'='*60}")
-            print(f"Background processing: {movie_data['title']} (ID: {movie_id})")
-            print(f"{'='*60}")
-            
-            # Get full movie details
-            full_movie = await tmdb.get_movie_details(movie_id)
-            
-            # Create EnhancedMovie object
-            movie_obj = EnhancedMovie(
-                id=full_movie["id"],
-                title=full_movie["title"],
-                year=year or 0,
-                release_date=full_movie.get("release_date"),
-                runtime_minutes=full_movie.get("runtime", 0),
-                poster_path=poster_url,
-                overview=full_movie.get("overview", ""),
-                vote_average=full_movie.get("vote_average", 0.0),
-                popularity=full_movie.get("popularity", 0.0),
-                imdb_id=full_movie.get("imdb_id"),
-                tier="on-demand",
-            )
-            
-            print(f"Analyzing TMDB + web articles + Ollama for: {movie_obj.title} {movie_obj.year}")
-            reddit_insights = await movie_insights.analyze_movie(full_movie)
-            print(f"✓ Easter eggs: {len(reddit_insights.easter_eggs)}")
-            print(f"✓ Post-credits: {reddit_insights.post_credits.has_scene}")
-            movie_obj.reddit_insights = reddit_insights
-            
-            # Save everything to database
-            await db.upsert_movie(movie_obj)
-            print(f"✓ Saved to database")
-            
-            has_content = (
-                reddit_insights.post_credits.has_scene
-                or len(reddit_insights.easter_eggs) > 0
-            )
-            
-            # Export and upload to MinIO if has content
-            if has_content:
-                print(f"📤 Exporting to MinIO (has content)...")
-                from src.json_exporter import JSONExporter
-                from src.storage_uploader import StorageUploader
-                
-                exporter = JSONExporter()
-                uploader = StorageUploader()
-                
-                await exporter.initialize()
-                try:
-                    # Export on-demand tier
-                    filepath = await exporter.export_tier("on-demand")
-                    # Upload to MinIO
-                    await uploader.upload_file(filepath)
-                    print(f"✓ Exported and uploaded to MinIO")
-                finally:
-                    await exporter.close()
-            
-            print(f"{'='*60}\n")
-                
-        except Exception as e:
-            print(f"❌ Error processing movie {movie_id}: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    # Start processing in background (fire and forget)
-    asyncio.create_task(process_movie_background())
+    stub = EnhancedMovie(
+        id=movie_id,
+        title=movie_data["title"],
+        year=year or 0,
+        release_date=release_date or "",
+        poster_path=poster_url,
+        overview=movie_data.get("overview") or "",
+        vote_average=movie_data.get("vote_average") or 0.0,
+        popularity=movie_data.get("popularity") or 0.0,
+        tier="on-demand",
+    )
+    await db.upsert_movie(stub)
+    await db.enqueue_extract_job(movie_id, movie_data["title"], year)
 
     msg = "Movie found! Analyzing post-credits info... "
     msg += "Check back in 30-60 seconds."
@@ -308,8 +254,8 @@ async def get_movies_by_tier(tier: str):
 @app.post("/movie/{movie_id}/refresh")
 async def refresh_movie_analysis(movie_id: int):
     """
-    Re-analyze a movie with fresh Reddit + IMDb data
-    Only allowed if last analysis was > 15 minutes ago
+    Re-queue a movie for extract (live articles + Ollama).
+    Only allowed if last analysis was > 15 minutes ago.
     """
     # Check if movie exists
     movie = await db.get_movie_by_id(movie_id)
@@ -342,72 +288,10 @@ async def refresh_movie_analysis(movie_id: int):
             "can_refresh_at": (last_scraped + timedelta(minutes=15)).isoformat() if last_scraped else None
         }
     
-    # Trigger re-analysis in background
-    from src.models import EnhancedMovie
-    
-    async def reanalyze_background():
-        try:
-            print(f"\n{'='*60}")
-            print(f"🔄 Re-analyzing: {movie['title']} (ID: {movie_id})")
-            print(f"{'='*60}")
-            
-            full_movie = await tmdb.get_movie_details(movie_id)
-            if not full_movie:
-                print("⚠ Could not refresh TMDB details")
-                return
-            reddit_insights = await movie_insights.analyze_movie(full_movie)
-            print(f"✓ Easter eggs: {len(reddit_insights.easter_eggs)}")
-            print(f"✓ Post-credits: {reddit_insights.post_credits.has_scene}")
+    await db.enqueue_extract_job(
+        movie_id, movie["title"], movie.get("year")
+    )
 
-            movie_obj = EnhancedMovie(
-                id=movie['id'],
-                title=movie['title'],
-                year=movie['year'],
-                release_date=movie.get('release_date'),
-                runtime_minutes=movie.get('runtime_minutes', 0),
-                poster_path=movie.get('poster_path'),
-                overview=movie.get('overview', ''),
-                vote_average=movie.get('vote_average', 0.0),
-                popularity=movie.get('popularity', 0.0),
-                imdb_id=movie.get('imdb_id'),
-                tier=movie.get('tier', 'on-demand'),
-                reddit_insights=reddit_insights
-            )
-
-            await db.upsert_movie(movie_obj)
-            print("✓ Updated in database")
-
-            has_content = (
-                reddit_insights.post_credits.has_scene
-                or len(reddit_insights.easter_eggs) > 0
-            )
-
-            if has_content:
-                print("📤 Exporting to MinIO...")
-                from src.json_exporter import JSONExporter
-                from src.storage_uploader import StorageUploader
-
-                exporter = JSONExporter()
-                uploader = StorageUploader()
-
-                await exporter.initialize()
-                try:
-                    tier = movie.get('tier', 'on-demand')
-                    filepath = await exporter.export_tier(tier)
-                    await uploader.upload_file(filepath)
-                    print("✓ Exported to MinIO")
-                finally:
-                    await exporter.close()
-
-            print(f"{'='*60}\n")
-
-        except Exception as e:
-            print(f"❌ Error re-analyzing: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    asyncio.create_task(reanalyze_background())
-    
     return {
         "status": "processing",
         "message": "Re-analyzing movie... Check back in 30-60 seconds",

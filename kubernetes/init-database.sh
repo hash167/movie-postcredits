@@ -90,6 +90,21 @@ CREATE TABLE reddit_insights (
     UNIQUE(movie_id)
 );
 
+-- Uncached insight extract queue
+CREATE TABLE IF NOT EXISTS extract_jobs (
+    id SERIAL PRIMARY KEY,
+    movie_id INT UNIQUE NOT NULL,
+    title TEXT,
+    year INT,
+    status VARCHAR(20) DEFAULT 'queued',
+    attempts INT DEFAULT 0,
+    last_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    locked_at TIMESTAMP
+);
+
 -- Batch logs (nightly theaters-daily CronJob)
 CREATE TABLE IF NOT EXISTS batch_logs (
     id SERIAL PRIMARY KEY,
@@ -109,6 +124,7 @@ CREATE INDEX idx_post_credits_movie_id ON post_credits(movie_id);
 CREATE INDEX idx_easter_eggs_movie_id ON easter_eggs(movie_id);
 CREATE INDEX idx_reddit_insights_movie_id ON reddit_insights(movie_id);
 CREATE INDEX IF NOT EXISTS idx_batch_logs_tier ON batch_logs(tier);
+CREATE INDEX IF NOT EXISTS idx_extract_jobs_status ON extract_jobs(status, created_at);
 
 -- Complete movie view using LIVE column names only
 CREATE OR REPLACE VIEW movies_complete AS
@@ -177,6 +193,7 @@ if [ $? -eq 0 ]; then
     echo "  - easter_eggs"
     echo "  - reddit_insights"
     echo "  - batch_logs"
+    echo "  - extract_jobs"
     echo "  - movies_complete (view)"
     echo ""
     echo -e "${YELLOW}Next steps:${NC}"

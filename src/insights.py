@@ -225,8 +225,8 @@ class MovieInsights:
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
-        # CPU llama3.1:8b needs >=240s; 180s failed with a blank error.
-        async with httpx.AsyncClient(timeout=240.0) as client:
+        # CPU llama3.1:8b; worker stale lock is 10 min (> 420s).
+        async with httpx.AsyncClient(timeout=420.0) as client:
             response = await client.post(url, json=body)
             if response.status_code >= 400:
                 # Some Ollama builds reject response_format; retry without it.

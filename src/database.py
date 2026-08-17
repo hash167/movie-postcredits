@@ -5,10 +5,12 @@ from src.config import settings
 from src.models import EnhancedMovie
 from src.schema_compat import (
     BATCH_LOGS_TABLE_SQL,
+    EXTRACT_JOBS_TABLE_SQL,
     MOVIES_COMPLETE_VIEW_SQL,
     egg_to_live_columns,
     worth_staying_to_db,
 )
+from src.extract_queue import enqueue_decision, movie_has_eggs_or_credits
 
 
 class DatabaseManager:
@@ -39,6 +41,11 @@ class DatabaseManager:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_batch_logs_tier "
                 "ON batch_logs(tier)"
+            )
+            await conn.execute(EXTRACT_JOBS_TABLE_SQL)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_extract_jobs_status "
+                "ON extract_jobs(status, created_at)"
             )
             movies_exist = await conn.fetchval(
                 """
@@ -182,6 +189,59 @@ class DatabaseManager:
                 "SELECT * FROM movies_complete WHERE id=$1", movie_id
             )
             return dict(row) if row else None
+
+    async def enqueue_extract_job(
+        self, movie_id: int, title: str, year: Optional[int]
+    ) -> str:
+        """INSERT ON CONFLICT. queued/running is a no-op.
+
+        Re-queue when status is done but the movie still has 0 eggs
+        and 0 credits (or the job failed).
+        """
+        async with self.pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                "SELECT id, status FROM extract_jobs WHERE movie_id = $1",
+                movie_id,
+            )
+            movie = None
+            if existing and existing["status"] == "done":
+                movie = await self.get_movie_by_id(movie_id)
+            decision = enqueue_decision(
+                dict(existing) if existing else None,
+                movie_has_eggs_or_credits(movie),
+            )
+            if decision == "noop":
+                return "noop"
+            if decision == "insert":
+                await conn.execute(
+                    """
+                    INSERT INTO extract_jobs (movie_id, title, year, status)
+                    VALUES ($1, $2, $3, 'queued')
+                    ON CONFLICT (movie_id) DO NOTHING
+                    """,
+                    movie_id,
+                    title,
+                    year,
+                )
+                return "insert"
+            await conn.execute(
+                """
+                UPDATE extract_jobs
+                SET status = 'queued',
+                    attempts = 0,
+                    started_at = NULL,
+                    locked_at = NULL,
+                    finished_at = NULL,
+                    last_error = NULL,
+                    title = $2,
+                    year = $3
+                WHERE movie_id = $1
+                """,
+                movie_id,
+                title,
+                year,
+            )
+            return "requeue"
 
     async def log_batch_start(self, tier: str) -> int:
         async with self.pool.acquire() as conn:

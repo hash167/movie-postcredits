@@ -139,3 +139,59 @@ CREATE TABLE IF NOT EXISTS batch_logs (
     status VARCHAR(50) DEFAULT 'running'
 )
 """
+
+EXTRACT_JOBS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS extract_jobs (
+    id SERIAL PRIMARY KEY,
+    movie_id INT UNIQUE NOT NULL,
+    title TEXT,
+    year INT,
+    status VARCHAR(20) DEFAULT 'queued',
+    attempts INT DEFAULT 0,
+    last_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    locked_at TIMESTAMP
+)
+"""
+
+# Claim lock is only held for this transaction. COMMIT before Ollama.
+# 10 min stale timeout > Ollama 420s so a live job is not stolen;
+# a crash leaves status=running until that timeout.
+CLAIM_EXTRACT_JOB_SQL = """
+SELECT id, movie_id, title, year, attempts
+FROM extract_jobs
+WHERE status = 'queued'
+ORDER BY created_at
+FOR UPDATE SKIP LOCKED
+LIMIT 1
+"""
+
+MARK_EXTRACT_RUNNING_SQL = """
+UPDATE extract_jobs
+SET status = 'running',
+    attempts = attempts + 1,
+    started_at = $2,
+    locked_at = $2
+WHERE id = $1
+RETURNING id, movie_id, title, year, attempts
+"""
+
+REQUEUE_STALE_RUNNING_SQL = """
+UPDATE extract_jobs
+SET status = 'queued'
+WHERE status = 'running'
+  AND started_at < $1
+  AND attempts < 3
+"""
+
+FAIL_STALE_RUNNING_SQL = """
+UPDATE extract_jobs
+SET status = 'failed',
+    finished_at = $2,
+    last_error = COALESCE(last_error, 'stale running timeout')
+WHERE status = 'running'
+  AND started_at < $1
+  AND attempts >= 3
+"""

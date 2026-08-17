@@ -84,6 +84,7 @@ class SetupSqlTests(unittest.TestCase):
             sql = fh.read()
         self.assertIn("reddit_discussion_count", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS batch_logs", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS extract_jobs", sql)
         self.assertIn("CREATE OR REPLACE VIEW movies_complete", sql)
         self.assertIn("worth_staying VARCHAR", sql)
         self.assertNotIn("ee.detail", sql)

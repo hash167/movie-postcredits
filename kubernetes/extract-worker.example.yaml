@@ -1,0 +1,39 @@
+# Extract worker (1 replica). Copy and set the image:
+#   kubectl apply -f kubernetes/extract-worker.yaml
+#
+# Claims uncached insight jobs from Postgres:
+#   python -m src.extract_worker
+# FOR UPDATE SKIP LOCKED; stale running > 10 minutes is re-queued.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: movie-extract-worker
+  namespace: movie-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: movie-extract-worker
+  template:
+    metadata:
+      labels:
+        app: movie-extract-worker
+    spec:
+      containers:
+      - name: extract-worker
+        image: your-dockerhub-username/movie-api:latest
+        imagePullPolicy: Always
+        command: ["python", "-m", "src.extract_worker"]
+        envFrom:
+        - configMapRef:
+            name: movie-api-config
+        - secretRef:
+            name: movie-api-secrets
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"

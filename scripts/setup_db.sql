@@ -53,6 +53,21 @@ CREATE TABLE IF NOT EXISTS reddit_insights (
     scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Uncached insight extract queue (FOR UPDATE SKIP LOCKED)
+CREATE TABLE IF NOT EXISTS extract_jobs (
+    id SERIAL PRIMARY KEY,
+    movie_id INT UNIQUE NOT NULL,
+    title TEXT,
+    year INT,
+    status VARCHAR(20) DEFAULT 'queued',
+    attempts INT DEFAULT 0,
+    last_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    locked_at TIMESTAMP
+);
+
 -- Create batch_logs table (nightly CronJob writes here)
 CREATE TABLE IF NOT EXISTS batch_logs (
     id SERIAL PRIMARY KEY,
@@ -111,6 +126,7 @@ CREATE INDEX IF NOT EXISTS idx_post_credits_movie_id ON post_credits(movie_id);
 CREATE INDEX IF NOT EXISTS idx_easter_eggs_movie_id ON easter_eggs(movie_id);
 CREATE INDEX IF NOT EXISTS idx_reddit_insights_movie_id ON reddit_insights(movie_id);
 CREATE INDEX IF NOT EXISTS idx_batch_logs_tier ON batch_logs(tier);
+CREATE INDEX IF NOT EXISTS idx_extract_jobs_status ON extract_jobs(status, created_at);
 
 -- Create updated_at trigger function
 CREATE OR REPLACE FUNCTION update_updated_at_column()

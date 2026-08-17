@@ -246,9 +246,10 @@ class OllamaTimeoutTests(unittest.TestCase):
     def test_chat_timeout_is_at_least_240s(self):
         with open("src/insights.py", encoding="utf-8") as fh:
             src = fh.read()
-        self.assertIn("timeout=240.0", src)
+        self.assertIn("timeout=420.0", src)
         self.assertNotIn("timeout=120.0", src)
         self.assertNotIn("timeout=180.0", src)
+        self.assertNotIn("timeout=240.0", src)
 
 
 class SourceRemovalTests(unittest.TestCase):
