@@ -12,6 +12,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from src import telemetry
+
 BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -118,38 +120,52 @@ def html_to_text(html_text: str) -> str:
 
 async def search_duckduckgo(query: str, limit: int = MAX_RESULTS) -> List[str]:
     params = {"q": query}
-    try:
-        async with httpx.AsyncClient(
-            timeout=SEARCH_TIMEOUT, follow_redirects=True, headers=BROWSER_HEADERS
-        ) as client:
-            response = await client.get(DDG_HTML, params=params)
-            if response.status_code >= 400:
-                response = await client.post(DDG_HTML, data=params)
-            if response.status_code != 200:
-                print(f"  ⚠️  DuckDuckGo search HTTP {response.status_code} for {query!r}")
-                return []
-            return parse_ddg_result_urls(response.text, limit=limit)
-    except Exception as exc:
-        print(f"  ⚠️  DuckDuckGo search failed for {query!r}: {exc}")
-        return []
+    host = urlparse(DDG_HTML).netloc
+    with telemetry.start_span(
+        "article_search", article_host=host
+    ) as span:
+        try:
+            async with httpx.AsyncClient(
+                timeout=SEARCH_TIMEOUT, follow_redirects=True, headers=BROWSER_HEADERS
+            ) as client:
+                response = await client.get(DDG_HTML, params=params)
+                if response.status_code >= 400:
+                    response = await client.post(DDG_HTML, data=params)
+                span.set_attribute("http_status", response.status_code)
+                if response.status_code != 200:
+                    print(f"  ⚠️  DuckDuckGo search HTTP {response.status_code} for {query!r}")
+                    return []
+                return parse_ddg_result_urls(response.text, limit=limit)
+        except Exception as exc:
+            span.set_attribute("http_status", 0)
+            print(f"  ⚠️  DuckDuckGo search failed for {query!r}: {exc}")
+            return []
 
 
 async def fetch_article_text(url: str) -> str:
-    try:
-        async with httpx.AsyncClient(
-            timeout=FETCH_TIMEOUT, follow_redirects=True, headers=BROWSER_HEADERS
-        ) as client:
-            response = await client.get(url)
-            if response.status_code != 200:
-                print(f"  ⚠️  Skip article HTTP {response.status_code}: {url}")
-                return ""
-            ctype = (response.headers.get("content-type") or "").lower()
-            if "html" not in ctype and "text/" not in ctype:
-                return ""
-            return html_to_text(response.text)[:MAX_PER_ARTICLE]
-    except Exception as exc:
-        print(f"  ⚠️  Skip article {url}: {exc}")
-        return ""
+    host = urlparse(url).netloc
+    with telemetry.start_span(
+        "article_fetch", article_host=host
+    ) as span:
+        try:
+            async with httpx.AsyncClient(
+                timeout=FETCH_TIMEOUT, follow_redirects=True, headers=BROWSER_HEADERS
+            ) as client:
+                response = await client.get(url)
+                span.set_attribute("http_status", response.status_code)
+                telemetry.record_article_fetch(response.status_code)
+                if response.status_code != 200:
+                    print(f"  ⚠️  Skip article HTTP {response.status_code}: {url}")
+                    return ""
+                ctype = (response.headers.get("content-type") or "").lower()
+                if "html" not in ctype and "text/" not in ctype:
+                    return ""
+                return html_to_text(response.text)[:MAX_PER_ARTICLE]
+        except Exception as exc:
+            span.set_attribute("http_status", 0)
+            telemetry.record_article_fetch(0)
+            print(f"  ⚠️  Skip article {url}: {exc}")
+            return ""
 
 
 async def gather_article_corpus(
