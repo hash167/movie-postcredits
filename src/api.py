@@ -9,12 +9,16 @@ from typing import Optional
 from datetime import datetime
 import json
 import asyncio
+import os
 
 from src.database import DatabaseManager
 from src.tmdb_client import TMDBClient
 from src.sync_job import sync_job
 from src.schema_compat import normalize_easter_eggs, worth_staying_to_bool
 from src.get_search import get_search_list
+from src import telemetry
+
+log = telemetry.get_logger("movie-postcredits.api")
 
 
 def _parse_easter_eggs(easter_eggs):
@@ -35,7 +39,6 @@ app = FastAPI(
 
 # Add CORS middleware
 # Configure CORS origins from environment variable for production
-import os
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080").split(",")
 app.add_middleware(
     CORSMiddleware,
@@ -45,6 +48,7 @@ app.add_middleware(
     allow_headers=["*"],
     max_age=3600,  # Cache preflight requests for 1 hour
 )
+app.add_middleware(telemetry.RequestTelemetryMiddleware)
 
 # Initialize managers
 db = DatabaseManager()
@@ -58,11 +62,14 @@ class SearchRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup():
-    """Initialize database connection and start background sync job"""
+    """Initialize telemetry, database connection, and background sync job"""
+    enabled = telemetry.init("movie-postcredits")
+    telemetry.instrument_fastapi(app)
+    log.info("telemetry_init enabled=%s", enabled)
     await db.connect()
     # Start background sync job
     asyncio.create_task(sync_job.start())
-    print("✅ Background sync job started (runs every 5 minutes)")
+    log.info("background_sync_started")
 
 
 @app.on_event("shutdown")
@@ -120,6 +127,8 @@ async def search_movie(request: SearchRequest):
         raise HTTPException(status_code=404, detail="Movie not found")
 
     movie_id = movie_data["id"]
+    telemetry.bind_context(tmdb_id=movie_id)
+    log.info("search query=%s tmdb_id=%s", request.query, movie_id)
 
     # Check if we have it in database
     cached = await db.get_movie_by_id(movie_id)
@@ -135,6 +144,7 @@ async def search_movie(request: SearchRequest):
             await db.enqueue_extract_job(
                 movie_id, cached["title"], cached.get("year") or year
             )
+            log.info("enqueue_extract cached_empty tmdb_id=%s", movie_id)
         return {
             "id": cached["id"],
             "title": cached["title"],
@@ -173,6 +183,7 @@ async def search_movie(request: SearchRequest):
     )
     await db.upsert_movie(stub)
     await db.enqueue_extract_job(movie_id, movie_data["title"], year)
+    log.info("enqueue_extract new tmdb_id=%s", movie_id)
 
     msg = "Movie found! Analyzing post-credits info... "
     msg += "Check back in 30-60 seconds."
@@ -192,6 +203,7 @@ async def search_movie(request: SearchRequest):
 @app.get("/movie/{movie_id}")
 async def get_movie(movie_id: int):
     """Get detailed information about a specific movie"""
+    telemetry.bind_context(tmdb_id=movie_id)
     movie = await db.get_movie_by_id(movie_id)
 
     if not movie:
@@ -271,6 +283,7 @@ async def refresh_movie_analysis(movie_id: int):
     Re-queue a movie for extract (live articles + Ollama).
     Only allowed if last analysis was > 15 minutes ago.
     """
+    telemetry.bind_context(tmdb_id=movie_id)
     # Check if movie exists
     movie = await db.get_movie_by_id(movie_id)
     if not movie:
@@ -305,6 +318,7 @@ async def refresh_movie_analysis(movie_id: int):
     await db.enqueue_extract_job(
         movie_id, movie["title"], movie.get("year")
     )
+    log.info("enqueue_extract refresh tmdb_id=%s", movie_id)
 
     return {
         "status": "processing",
