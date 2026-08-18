@@ -77,3 +77,7 @@ flowchart TD
   fe -->|poll GET /movie/id| api
   api --> pg
 ```
+
+## Observability (Honeycomb)
+
+Set `HONEYCOMB_API_KEY` in the environment to export traces and metrics over OTLP HTTP (`https://api.honeycomb.io`). Without the key, telemetry is a no-op. In Honeycomb environment `test`, query `service.name = movie-postcredits` (API) or `movie-postcredits-worker` (extract workers).
