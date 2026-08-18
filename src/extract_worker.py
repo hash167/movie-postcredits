@@ -8,6 +8,7 @@ not stolen; crash leaves status=running until timeout.
 """
 
 import asyncio
+import time
 import traceback
 from datetime import datetime
 
@@ -22,6 +23,9 @@ from src.schema_compat import (
     REQUEUE_STALE_RUNNING_SQL,
 )
 from src.tmdb_client import TMDBClient
+from src import telemetry
+
+log = telemetry.get_logger("movie-postcredits.worker")
 
 IDLE_SLEEP_SECONDS = 2
 
@@ -96,18 +100,46 @@ class ExtractWorker:
     async def run_job(self, job: dict):
         movie_id = job["movie_id"]
         title = job.get("title") or "Unknown"
-        print(f"extract job {job['id']}: {title} ({movie_id})")
-        details = await self.tmdb.get_movie_details(movie_id)
-        if not details:
-            raise RuntimeError(f"TMDB details missing for {movie_id}")
-        formatted = self.tmdb.format_movie(details, "on-demand")
-        insights = await self.insights.analyze_movie(details)
-        movie = EnhancedMovie(**formatted, reddit_insights=insights)
-        await self.db.upsert_movie(movie)
-        print(
-            f"  saved has_scene={insights.post_credits.has_scene} "
-            f"eggs={len(insights.easter_eggs)}"
-        )
+        job_id = job["id"]
+        attempts = job.get("attempts") or 0
+        telemetry.bind_context(tmdb_id=movie_id)
+        print(f"extract job {job_id}: {title} ({movie_id})")
+        eggs_count = 0
+        started = time.perf_counter()
+        status = "error"
+        try:
+            with telemetry.start_span(
+                "extract.job",
+                tmdb_id=movie_id,
+                movie_id=movie_id,
+                job_id=job_id,
+                attempts=attempts,
+            ) as span:
+                with telemetry.start_span("tmdb.details", tmdb_id=movie_id):
+                    details = await self.tmdb.get_movie_details(movie_id)
+                if not details:
+                    raise RuntimeError(f"TMDB details missing for {movie_id}")
+                formatted = self.tmdb.format_movie(details, "on-demand")
+                with telemetry.start_span(
+                    "insights.analyze_movie", tmdb_id=movie_id
+                ):
+                    insights = await self.insights.analyze_movie(details)
+                eggs_count = len(insights.easter_eggs or [])
+                span.set_attribute("eggs_count", eggs_count)
+                movie = EnhancedMovie(**formatted, reddit_insights=insights)
+                with telemetry.start_span(
+                    "db.upsert", tmdb_id=movie_id, movie_id=movie_id
+                ):
+                    await self.db.upsert_movie(movie)
+                status = "done"
+                span.set_attribute("status", status)
+                print(
+                    f"  saved has_scene={insights.post_credits.has_scene} "
+                    f"eggs={eggs_count}"
+                )
+        finally:
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            telemetry.record_extract_job(status, duration_ms, eggs_count)
 
     async def loop_once(self) -> bool:
         await self.requeue_stale()
@@ -131,6 +163,8 @@ class ExtractWorker:
 
 
 async def main():
+    telemetry.init("movie-postcredits-worker")
+    log.info("worker_telemetry_init enabled=%s", telemetry.enabled())
     worker = ExtractWorker()
     await worker.initialize()
     try:
