@@ -45,5 +45,43 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("image.tmdb.org", src)
 
 
+
+    def test_typeahead_uses_get_search_query_param(self):
+        with open("frontend/useMovieSearch.js", encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn('params.set(\'query\'', src.replace('"', "'"))
+        self.assertIn('/search?', src)
+        self.assertIn('TYPEAHEAD_DEBOUNCE_MS', src)
+        self.assertIn('300', src)
+        self.assertIn('if (cancelled)', src)
+        self.assertIn('findCdnMovieById', src)
+        self.assertIn('movie_id', src)
+
+    def test_typeahead_never_ranks_with_includes(self):
+        """Short titles (It, Up, Her, Sh) must not win via query.includes(title)."""
+        files = [
+            "frontend/useMovieSearch.js",
+            "frontend/MovieSearchComponent.js",
+        ]
+        banned = (
+            "searchInCDN",
+            "title.includes",
+            "term.includes",
+            "query.includes",
+            "movieTitle.includes",
+            "movie.title.toLowerCase().includes",
+        )
+        for path in files:
+            with open(path, encoding="utf-8") as fh:
+                src = fh.read()
+            for token in banned:
+                self.assertNotIn(token, src, f"{path} still has {token}")
+
+    def test_search_results_list_is_rendered(self):
+        with open("frontend/MovieSearchComponent.js", encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("Search results", src)
+        self.assertIn("setChosen", src)
+
 if __name__ == "__main__":
     unittest.main()
