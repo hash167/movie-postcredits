@@ -7,6 +7,7 @@ Easter eggs come from fetched articles, not the model's training cutoff.
 
 import json
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -14,6 +15,7 @@ import httpx
 from src.config import settings
 from src.models import EasterEgg, PostCreditsScene, RedditInsights
 from src.web_search import gather_article_corpus
+from src import telemetry
 
 KEYWORD_POST_CREDITS = 179430
 KEYWORD_MID_CREDITS = 179431
@@ -226,17 +228,28 @@ class MovieInsights:
             "response_format": {"type": "json_object"},
         }
         # CPU llama3.1:8b; worker stale lock is 10 min (> 420s).
-        async with httpx.AsyncClient(timeout=420.0) as client:
-            response = await client.post(url, json=body)
-            if response.status_code >= 400:
-                # Some Ollama builds reject response_format; retry without it.
-                body.pop("response_format", None)
-                response = await client.post(url, json=body)
-            response.raise_for_status()
-            data = response.json()
-        content = (
-            data.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
-        return parse_json_content(content)
+        started = time.perf_counter()
+        host = self.ollama_host
+        with telemetry.start_span(
+            "ollama_extract", article_host=host
+        ) as span:
+            try:
+                async with httpx.AsyncClient(timeout=420.0) as client:
+                    response = await client.post(url, json=body)
+                    if response.status_code >= 400:
+                        # Some Ollama builds reject response_format; retry without it.
+                        body.pop("response_format", None)
+                        response = await client.post(url, json=body)
+                    span.set_attribute("http_status", response.status_code)
+                    response.raise_for_status()
+                    data = response.json()
+                content = (
+                    data.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+                return parse_json_content(content)
+            finally:
+                ollama_ms = (time.perf_counter() - started) * 1000.0
+                span.set_attribute("ollama_ms", ollama_ms)
+                telemetry.record_ollama_duration(ollama_ms)
