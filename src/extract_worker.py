@@ -15,6 +15,7 @@ from src.database import DatabaseManager
 from src.extract_queue import STALE_AFTER, status_after_error
 from src.insights import MovieInsights, OllamaExtractError
 from src.models import EnhancedMovie
+from src.telemetry import start_span
 from src.schema_compat import (
     CLAIM_EXTRACT_JOB_SQL,
     FAIL_STALE_RUNNING_SQL,
@@ -115,7 +116,16 @@ class ExtractWorker:
         if not job:
             return False
         try:
-            await self.run_job(job)
+            with start_span(
+                "extract.job",
+                attributes={
+                    "job.id": job["id"],
+                    "movie.id": job["movie_id"],
+                    "movie.title": job.get("title") or "Unknown",
+                    "extract.attempts": job.get("attempts") or 0,
+                },
+            ):
+                await self.run_job(job)
             await self.mark_done(job["id"])
         except OllamaExtractError as exc:
             # Transport/timeout/HTTP/parse — never look like a successful done.

@@ -1,7 +1,7 @@
 import os
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("TMDB_API_KEY", "test")
 os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/db")
@@ -341,6 +341,42 @@ class WorkerOllamaErrorTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
         worker.db.upsert_movie.assert_not_called()
+
+    async def test_extract_job_span_error_on_ollama_failure(self):
+        from src.extract_worker import ExtractWorker
+        from src.insights import OllamaExtractError
+        from tests.span_helpers import recording_start_span
+
+        started = []
+        worker = ExtractWorker()
+        worker.requeue_stale = AsyncMock()
+        worker.claim_one = AsyncMock(
+            return_value={
+                "id": 7,
+                "movie_id": 505642,
+                "title": "Wakanda Forever",
+                "attempts": 1,
+            }
+        )
+        worker.run_job = AsyncMock(
+            side_effect=OllamaExtractError("timed out")
+        )
+        worker.mark_done = AsyncMock()
+        worker.mark_error = AsyncMock()
+        with patch(
+            "src.extract_worker.start_span", recording_start_span(started)
+        ):
+            await worker.loop_once()
+        self.assertTrue(any(name == "extract.job" for name, _s in started))
+        span = next(s for n, s in started if n == "extract.job")
+        self.assertTrue(span.exceptions)
+        self.assertIn("ERROR", [str(st) for st in span.statuses])
+        self.assertEqual(span.attributes.get("job.id"), 7)
+        self.assertEqual(span.attributes.get("movie.id"), 505642)
+        self.assertEqual(span.attributes.get("movie.title"), "Wakanda Forever")
+        self.assertEqual(span.attributes.get("extract.attempts"), 1)
+        worker.mark_done.assert_not_called()
+        worker.mark_error.assert_awaited()
 
 
 class EnqueueExtractRefreshTests(unittest.IsolatedAsyncioTestCase):

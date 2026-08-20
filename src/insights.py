@@ -13,6 +13,7 @@ import httpx
 
 from src.config import settings
 from src.models import EasterEgg, PostCreditsScene, RedditInsights
+from src.telemetry import start_span
 from src.web_search import gather_article_corpus
 
 KEYWORD_POST_CREDITS = 179430
@@ -209,25 +210,43 @@ class MovieInsights:
             "  ]\n"
             "}\n"
         )
-        eggs = await self.eggs_from_ollama(system_msg, prompt)
+        eggs = await self.eggs_from_ollama(
+            system_msg,
+            prompt,
+            title=title,
+            year=year,
+            article_count=len(source_urls),
+        )
         print(f"  ✓ Ollama extracted {len(eggs)} eggs from articles")
         return eggs, source_urls
 
     async def eggs_from_ollama(
-        self, system_msg: str, prompt: str
+        self,
+        system_msg: str,
+        prompt: str,
+        title: Optional[str] = None,
+        year: Optional[int] = None,
+        article_count: int = 0,
     ) -> List[EasterEgg]:
         """Call Ollama and parse eggs. Raise on transport/HTTP/parse failure.
 
         A real empty extract (valid JSON with easter_eggs: []) returns [].
         """
-        try:
-            payload = await self._chat_json(system_msg, prompt)
-            return eggs_from_model_payload(payload)
-        except OllamaExtractError:
-            raise
-        except Exception as exc:
-            print(f"  ⚠️  Ollama easter-egg extract failed: {exc}")
-            raise OllamaExtractError(str(exc)) from exc
+        attrs = {
+            "movie.title": title or "Unknown",
+            "movie.year": year if year is not None else 0,
+            "ollama.model": self.ollama_model,
+            "article.count": article_count,
+        }
+        with start_span("ollama.extract", attributes=attrs):
+            try:
+                payload = await self._chat_json(system_msg, prompt)
+                return eggs_from_model_payload(payload)
+            except OllamaExtractError:
+                raise
+            except Exception as exc:
+                print(f"  ⚠️  Ollama easter-egg extract failed: {exc}")
+                raise OllamaExtractError(str(exc)) from exc
 
     async def fill_insights(self, details: Dict) -> RedditInsights:
         return await self.analyze_movie(details)

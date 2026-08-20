@@ -359,6 +359,57 @@ class OllamaExtractErrorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OllamaExtractError):
             await analyzer.eggs_from_ollama("sys", "prompt")
 
+    async def test_ollama_timeout_records_extract_span_error(self):
+        from tests.span_helpers import recording_start_span
+
+        started = []
+
+        async def post(url, json=None):
+            raise httpx.TimeoutException("timed out")
+
+        analyzer = self._analyzer()
+        with patch(
+            "src.insights.gather_article_corpus",
+            AsyncMock(return_value=_article_corpus()),
+        ), patch("src.insights.httpx.AsyncClient", _fake_httpx(post)), patch(
+            "src.insights.start_span", recording_start_span(started)
+        ):
+            with self.assertRaises(OllamaExtractError):
+                await self._extract(analyzer)
+        names = [name for name, _span in started]
+        self.assertIn("ollama.extract", names)
+        span = next(s for n, s in started if n == "ollama.extract")
+        self.assertTrue(span.exceptions)
+        self.assertIn("ERROR", [str(st) for st in span.statuses])
+        self.assertEqual(span.attributes.get("movie.title"), "Black Panther: Wakanda Forever")
+        self.assertEqual(span.attributes.get("movie.year"), 2022)
+        self.assertEqual(span.attributes.get("ollama.model"), "llama3.1:8b")
+        self.assertEqual(span.attributes.get("article.count"), 1)
+
+    async def test_ollama_http_error_records_extract_span_error(self):
+        from tests.span_helpers import recording_start_span
+
+        started = []
+        request = httpx.Request(
+            "POST", "http://ollama.test/v1/chat/completions"
+        )
+
+        async def post(url, json=None):
+            return httpx.Response(500, request=request, text="nope")
+
+        analyzer = self._analyzer()
+        with patch(
+            "src.insights.gather_article_corpus",
+            AsyncMock(return_value=_article_corpus()),
+        ), patch("src.insights.httpx.AsyncClient", _fake_httpx(post)), patch(
+            "src.insights.start_span", recording_start_span(started)
+        ):
+            with self.assertRaises(OllamaExtractError):
+                await self._extract(analyzer)
+        span = next(s for n, s in started if n == "ollama.extract")
+        self.assertTrue(span.exceptions)
+        self.assertIn("ERROR", [str(st) for st in span.statuses])
+
 
 class OllamaTimeoutTests(unittest.TestCase):
     def test_chat_timeout_is_at_least_240s(self):
