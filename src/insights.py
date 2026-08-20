@@ -19,6 +19,10 @@ KEYWORD_POST_CREDITS = 179430
 KEYWORD_MID_CREDITS = 179431
 
 
+class OllamaExtractError(Exception):
+    """Ollama transport, timeout, HTTP, or parse failure — not a real empty extract."""
+
+
 def extract_keywords(movie_data: Optional[Dict]) -> List[Dict]:
     """Read TMDB keyword objects from a details or /keywords payload."""
     if not movie_data:
@@ -205,14 +209,28 @@ class MovieInsights:
             "  ]\n"
             "}\n"
         )
+        eggs = await self.eggs_from_ollama(system_msg, prompt)
+        print(f"  ✓ Ollama extracted {len(eggs)} eggs from articles")
+        return eggs, source_urls
+
+    async def eggs_from_ollama(
+        self, system_msg: str, prompt: str
+    ) -> List[EasterEgg]:
+        """Call Ollama and parse eggs. Raise on transport/HTTP/parse failure.
+
+        A real empty extract (valid JSON with easter_eggs: []) returns [].
+        """
         try:
             payload = await self._chat_json(system_msg, prompt)
-            eggs = eggs_from_model_payload(payload)
-            print(f"  ✓ Ollama extracted {len(eggs)} eggs from articles")
-            return eggs, source_urls
+            return eggs_from_model_payload(payload)
+        except OllamaExtractError:
+            raise
         except Exception as exc:
             print(f"  ⚠️  Ollama easter-egg extract failed: {exc}")
-            return [], source_urls
+            raise OllamaExtractError(str(exc)) from exc
+
+    async def fill_insights(self, details: Dict) -> RedditInsights:
+        return await self.analyze_movie(details)
 
     async def _chat_json(self, system_msg: str, prompt: str) -> Dict[str, Any]:
         url = f"{self.ollama_host}/v1/chat/completions"
@@ -226,17 +244,23 @@ class MovieInsights:
             "response_format": {"type": "json_object"},
         }
         # CPU llama3.1:8b; worker stale lock is 10 min (> 420s).
-        async with httpx.AsyncClient(timeout=420.0) as client:
-            response = await client.post(url, json=body)
-            if response.status_code >= 400:
-                # Some Ollama builds reject response_format; retry without it.
-                body.pop("response_format", None)
+        try:
+            async with httpx.AsyncClient(timeout=420.0) as client:
                 response = await client.post(url, json=body)
-            response.raise_for_status()
-            data = response.json()
-        content = (
-            data.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
-        return parse_json_content(content)
+                if response.status_code >= 400:
+                    # Some Ollama builds reject response_format; retry without it.
+                    body.pop("response_format", None)
+                    response = await client.post(url, json=body)
+                response.raise_for_status()
+                data = response.json()
+            content = (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+            )
+            return parse_json_content(content)
+        except OllamaExtractError:
+            raise
+        except Exception as exc:
+            print(f"  ⚠️  Ollama easter-egg extract failed: {exc}")
+            raise OllamaExtractError(str(exc)) from exc

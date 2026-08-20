@@ -20,14 +20,23 @@ def movie_has_eggs_or_credits(movie: Optional[Dict[str, Any]]) -> bool:
     return has_eggs or has_credits
 
 
-def enqueue_decision(existing: Optional[Dict[str, Any]], has_content: bool) -> str:
-    """Return insert | noop | requeue."""
+def enqueue_decision(
+    existing: Optional[Dict[str, Any]],
+    has_content: bool,
+    refresh: bool = False,
+) -> str:
+    """Return insert | noop | requeue.
+
+    refresh=True re-queues done and failed (phone Refresh).
+    refresh=False leaves done alone — a real empty extract stays done.
+    Failed jobs are re-queued so a later search can retry.
+    """
     if existing is None:
         return "insert"
     status = (existing.get("status") or "").lower()
     if status in ("queued", "running"):
         return "noop"
-    if status == "done" and not has_content:
+    if refresh and status in ("done", "failed"):
         return "requeue"
     if status == "failed":
         return "requeue"

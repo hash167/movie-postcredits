@@ -302,8 +302,8 @@ async def refresh_movie_analysis(movie_id: int):
             "can_refresh_at": (last_scraped + timedelta(minutes=15)).isoformat() if last_scraped else None
         }
     
-    await db.enqueue_extract_job(
-        movie_id, movie["title"], movie.get("year")
+    await db.enqueue_extract(
+        movie_id, movie["title"], movie.get("year"), refresh=True
     )
 
     return {

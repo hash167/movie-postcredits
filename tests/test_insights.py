@@ -5,10 +5,13 @@ from unittest.mock import AsyncMock, patch
 os.environ.setdefault("TMDB_API_KEY", "test")
 os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/db")
 
+import httpx
+
 from src.insights import (
     KEYWORD_MID_CREDITS,
     KEYWORD_POST_CREDITS,
     MovieInsights,
+    OllamaExtractError,
     eggs_from_model_payload,
     extract_keywords,
     parse_json_content,
@@ -221,11 +224,13 @@ class MovieInsightsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("only from the articles", user_prompt.lower())
         self.assertNotIn("search_reddit", user_prompt)
 
-    async def test_ollama_error_returns_empty_eggs_not_invented(self):
+    async def test_ollama_error_raises_not_empty_list(self):
         analyzer = MovieInsights(
             ollama_host="http://ollama.test", ollama_model="llama3.1:8b"
         )
-        analyzer._chat_json = AsyncMock(side_effect=RuntimeError("down"))
+        analyzer._chat_json = AsyncMock(
+            side_effect=OllamaExtractError("down")
+        )
         with patch(
             "src.insights.gather_article_corpus",
             AsyncMock(
@@ -235,11 +240,124 @@ class MovieInsightsTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         ):
-            eggs, urls = await analyzer.extract_easter_eggs(
-                {"title": "Nope", "overview": "", "keywords": []}
+            with self.assertRaises(OllamaExtractError):
+                await analyzer.extract_easter_eggs(
+                    {"title": "Nope", "overview": "", "keywords": []}
+                )
+
+
+def _article_corpus():
+    return {
+        "urls": ["https://example.com/wakanda"],
+        "text": "SOURCE: https://example.com/wakanda\nPost-credits tease.",
+    }
+
+
+def _fake_httpx(post_fn):
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None):
+            return await post_fn(url, json)
+
+    return FakeClient
+
+
+class OllamaExtractErrorTests(unittest.IsolatedAsyncioTestCase):
+    def _analyzer(self):
+        return MovieInsights(
+            ollama_host="http://ollama.test", ollama_model="llama3.1:8b"
+        )
+
+    async def _extract(self, analyzer):
+        return await analyzer.extract_easter_eggs(
+            {
+                "title": "Black Panther: Wakanda Forever",
+                "release_date": "2022-11-11",
+                "overview": "",
+                "keywords": [],
+            }
+        )
+
+    async def test_timeout_raises_ollama_extract_error(self):
+        async def post(url, json=None):
+            raise httpx.TimeoutException("timed out")
+
+        analyzer = self._analyzer()
+        with patch(
+            "src.insights.gather_article_corpus",
+            AsyncMock(return_value=_article_corpus()),
+        ), patch("src.insights.httpx.AsyncClient", _fake_httpx(post)):
+            with self.assertRaises(OllamaExtractError):
+                await self._extract(analyzer)
+
+    async def test_http_500_raises_ollama_extract_error(self):
+        request = httpx.Request(
+            "POST", "http://ollama.test/v1/chat/completions"
+        )
+
+        async def post(url, json=None):
+            return httpx.Response(500, request=request, text="nope")
+
+        analyzer = self._analyzer()
+        with patch(
+            "src.insights.gather_article_corpus",
+            AsyncMock(return_value=_article_corpus()),
+        ), patch("src.insights.httpx.AsyncClient", _fake_httpx(post)):
+            with self.assertRaises(OllamaExtractError):
+                await self._extract(analyzer)
+
+    async def test_connection_error_raises_ollama_extract_error(self):
+        async def post(url, json=None):
+            raise httpx.ConnectError("connection refused")
+
+        analyzer = self._analyzer()
+        with patch(
+            "src.insights.gather_article_corpus",
+            AsyncMock(return_value=_article_corpus()),
+        ), patch("src.insights.httpx.AsyncClient", _fake_httpx(post)):
+            with self.assertRaises(OllamaExtractError):
+                await self._extract(analyzer)
+
+    async def test_valid_empty_easter_eggs_json_returns_empty(self):
+        request = httpx.Request(
+            "POST", "http://ollama.test/v1/chat/completions"
+        )
+
+        async def post(url, json=None):
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "choices": [
+                        {"message": {"content": '{"easter_eggs": []}'}}
+                    ]
+                },
             )
+
+        analyzer = self._analyzer()
+        with patch(
+            "src.insights.gather_article_corpus",
+            AsyncMock(return_value=_article_corpus()),
+        ), patch("src.insights.httpx.AsyncClient", _fake_httpx(post)):
+            eggs, urls = await self._extract(analyzer)
         self.assertEqual(eggs, [])
-        self.assertEqual(urls, ["https://example.com/a"])
+        self.assertEqual(urls, ["https://example.com/wakanda"])
+
+    async def test_eggs_from_ollama_raises_on_parse_failure(self):
+        analyzer = self._analyzer()
+        analyzer._chat_json = AsyncMock(
+            side_effect=OllamaExtractError("no JSON object in model output")
+        )
+        with self.assertRaises(OllamaExtractError):
+            await analyzer.eggs_from_ollama("sys", "prompt")
 
 
 class OllamaTimeoutTests(unittest.TestCase):

@@ -10,7 +10,7 @@ from src.schema_compat import (
     egg_to_live_columns,
     worth_staying_to_db,
 )
-from src.extract_queue import enqueue_decision, movie_has_eggs_or_credits
+from src.extract_queue import enqueue_decision
 
 
 class DatabaseManager:
@@ -223,25 +223,27 @@ class DatabaseManager:
                 )
         return [dict(row) for row in rows]
 
-    async def enqueue_extract_job(
-        self, movie_id: int, title: str, year: Optional[int]
+    async def enqueue_extract(
+        self,
+        movie_id: int,
+        title: str,
+        year: Optional[int],
+        refresh: bool = False,
     ) -> str:
         """INSERT ON CONFLICT. queued/running is a no-op.
 
-        Re-queue when status is done but the movie still has 0 eggs
-        and 0 credits (or the job failed).
+        refresh=True re-queues done and failed (phone Refresh).
+        refresh=False leaves a done row alone.
         """
         async with self.pool.acquire() as conn:
             existing = await conn.fetchrow(
                 "SELECT id, status FROM extract_jobs WHERE movie_id = $1",
                 movie_id,
             )
-            movie = None
-            if existing and existing["status"] == "done":
-                movie = await self.get_movie_by_id(movie_id)
             decision = enqueue_decision(
                 dict(existing) if existing else None,
-                movie_has_eggs_or_credits(movie),
+                False,
+                refresh=refresh,
             )
             if decision == "noop":
                 return "noop"
@@ -275,6 +277,17 @@ class DatabaseManager:
                 year,
             )
             return "requeue"
+
+    async def enqueue_extract_job(
+        self,
+        movie_id: int,
+        title: str,
+        year: Optional[int],
+        refresh: bool = False,
+    ) -> str:
+        return await self.enqueue_extract(
+            movie_id, title, year, refresh=refresh
+        )
 
     async def log_batch_start(self, tier: str) -> int:
         async with self.pool.acquire() as conn:
