@@ -68,9 +68,9 @@ class TMDBClient:
                     movies.extend(data["results"])
         return movies
 
-    async def search_movies(
-        self, query: str, year: Optional[int] = None, limit: int = 20
-    ) -> List[Dict]:
+    async def search_movie(
+        self, query: str, year: Optional[int] = None
+    ) -> Optional[Dict]:
         url = f"{self.base_url}/search/movie"
         params = {"api_key": self.api_key, "query": query, "language": "en-US"}
         if year:
@@ -79,23 +79,41 @@ class TMDBClient:
             response = await client.get(url, params=params)
             response.raise_for_status()
             data = response.json()
-        return (data.get("results") or [])[:limit]
+            return data["results"][0] if data.get("results") else None
 
-    async def search_movie(
+    async def search_movies(
         self, query: str, year: Optional[int] = None
-    ) -> Optional[Dict]:
-        results = await self.search_movies(query, year, limit=1)
-        return results[0] if results else None
-
-    async def get_movie_keywords(self, movie_id: int) -> List[Dict]:
-        """Dedicated /movie/{id}/keywords call."""
-        url = f"{self.base_url}/movie/{movie_id}/keywords"
-        params = {"api_key": self.api_key}
-        async with httpx.AsyncClient() as client:
+    ) -> List[Dict]:
+        """Return up to 20 TMDB /search/movie hits. Does not mutate state."""
+        url = f"{self.base_url}/search/movie"
+        params = {"api_key": self.api_key, "query": query, "language": "en-US"}
+        if year:
+            params["year"] = year
+        async with httpx.AsyncClient(timeout=8.0) as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
             data = response.json()
-        return data.get("keywords") or data.get("results") or []
+        results = []
+        for item in (data.get("results") or [])[:20]:
+            release_date = item.get("release_date") or ""
+            year_val = None
+            if len(release_date) >= 4:
+                try:
+                    year_val = int(release_date[:4])
+                except ValueError:
+                    year_val = None
+            poster_path = None
+            if item.get("poster_path"):
+                poster_path = f"{self.image_base}{item['poster_path']}"
+            results.append({
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "year": year_val,
+                "poster_path": poster_path,
+                "overview": item.get("overview") or "",
+                "popularity": item.get("popularity", 0.0),
+            })
+        return results
 
     async def get_movie_details(self, movie_id: int) -> Optional[Dict]:
         url = f"{self.base_url}/movie/{movie_id}"
@@ -107,17 +125,7 @@ class TMDBClient:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
-            data = response.json()
-        from src.insights import extract_keywords
-
-        if not extract_keywords(data):
-            try:
-                keywords = await self.get_movie_keywords(movie_id)
-                if keywords:
-                    data["keywords"] = {"keywords": keywords}
-            except Exception as exc:
-                print(f"  ⚠️  TMDB keywords fallback failed: {exc}")
-        return data
+            return response.json()
 
     def format_movie(self, movie_data: Dict, tier: str) -> Dict:
         release_date = movie_data.get("release_date")
