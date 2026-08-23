@@ -58,6 +58,7 @@ tmdb = TMDBClient()
 class SearchRequest(BaseModel):
     query: str
     year: Optional[int] = None
+    movie_id: Optional[int] = None
 
 
 @app.on_event("startup")
@@ -102,10 +103,14 @@ def read_root():
 
 
 @app.get("/search")
-async def search_movies_get(query: str = "", year: Optional[int] = None):
-    """Typeahead list. Cached + single-flight. Does not enqueue extract."""
+async def search_movies_get(query: str = "", q: str = "", year: Optional[int] = None):
+    """Typeahead list. Cached + single-flight. Does not enqueue extract.
+
+    `query` is the canonical param. `q` is accepted only as an alias so an
+    old client cannot silently search the empty string.
+    """
     return await get_search_list(
-        query,
+        query or q,
         year,
         tmdb.search_movies,
         db.search_movies_ilike,
@@ -120,8 +125,19 @@ async def search_movie(request: SearchRequest):
     - First checks database (cached)
     - If not found, triggers background processing and returns placeholder
     """
-    # Search TMDB
-    movie_data = await tmdb.search_movie(request.query, request.year)
+    # Prefer the tapped TMDB id. Title search is only a fallback so a
+    # short title cannot be remapped to a different first hit.
+    movie_data = None
+    if request.movie_id:
+        try:
+            details = await tmdb.get_movie_details(request.movie_id)
+        except Exception as exc:
+            log.info("tmdb_details_failed tmdb_id=%s err=%s", request.movie_id, exc)
+            details = None
+        if details and details.get("id"):
+            movie_data = details
+    if not movie_data:
+        movie_data = await tmdb.search_movie(request.query, request.year)
 
     if not movie_data:
         raise HTTPException(status_code=404, detail="Movie not found")

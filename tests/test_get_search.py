@@ -144,6 +144,91 @@ class GetSearchBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.tmdb.assert_not_called()
         self.db.assert_not_called()
 
+    async def test_year_is_forwarded_to_tmdb(self):
+        await self._search("It", 2017)
+        self.tmdb.assert_awaited()
+        self.assertEqual(self.tmdb.await_args.args[0], "It")
+        self.assertEqual(self.tmdb.await_args.args[1], 2017)
+
+    async def test_short_titles_keep_tmdb_order(self):
+        """Typeahead must not re-rank short catalog titles over TMDB."""
+        cases = [
+            (
+                "Sh",
+                [
+                    {"id": 1484775, "title": "Sh", "release_date": "2025-01-01", "poster_path": "/sh.jpg", "overview": "short"},
+                    {"id": 37165, "title": "The Truman Show", "release_date": "1998-06-05", "poster_path": "/t.jpg", "overview": "truman"},
+                ],
+                "Sh",
+            ),
+            (
+                "It",
+                [
+                    {"id": 346364, "title": "It", "release_date": "2017-09-08", "poster_path": "/it.jpg", "overview": "clown"},
+                    {"id": 62, "title": "2001: A Space Odyssey", "release_date": "1968-04-02", "poster_path": "/o.jpg", "overview": "odyssey"},
+                ],
+                "It",
+            ),
+            (
+                "Up",
+                [
+                    {"id": 14160, "title": "Up", "release_date": "2009-05-29", "poster_path": "/up.jpg", "overview": "balloons"},
+                ],
+                "Up",
+            ),
+            (
+                "Her",
+                [
+                    {"id": 152601, "title": "Her", "release_date": "2013-12-18", "poster_path": "/her.jpg", "overview": "os"},
+                ],
+                "Her",
+            ),
+            (
+                "Truman show",
+                [
+                    {"id": 37165, "title": "The Truman Show", "release_date": "1998-06-05", "poster_path": "/t.jpg", "overview": "truman"},
+                    {"id": 1484775, "title": "Sh", "release_date": "2025-01-01", "poster_path": "/sh.jpg", "overview": "short"},
+                ],
+                "The Truman Show",
+            ),
+        ]
+        for query, hits, first in cases:
+            self.tmdb.reset_mock()
+            self.tmdb.return_value = hits
+            self.tmdb.side_effect = None
+            payload = await self._search(query, None)
+            self.assertEqual(payload["results"][0]["title"], first, query)
+            self.assertEqual(
+                [row["title"] for row in payload["results"]],
+                [h["title"] for h in hits],
+                query,
+            )
+
+    async def test_postgres_fallback_is_title_contains_query(self):
+        """ILIKE '%truman show%' must not invent a reverse includes() hit."""
+        self.tmdb.side_effect = RuntimeError("tmdb down")
+        self.db.return_value = []
+        payload = await self._search("Truman show", None)
+        self.db.assert_awaited()
+        self.assertEqual(self.db.await_args.args[0], "Truman show")
+        self.assertEqual(payload["count"], 0)
+        self.assertEqual(payload["results"], [])
+
+
+class GetSearchContractTests(unittest.TestCase):
+    def test_ilike_is_not_bidirectional(self):
+        with open("src/database.py", encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn('pattern = f"%{query}%"', src)
+        self.assertIn("title ILIKE $1", src)
+        self.assertNotIn("query ILIKE", src)
+
+    def test_get_search_accepts_q_alias(self):
+        with open("src/api.py", encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn('q: str = ""', src)
+        self.assertIn("query or q", src)
+        self.assertIn("movie_id: Optional[int] = None", src)
 
 if __name__ == "__main__":
     unittest.main()
