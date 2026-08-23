@@ -41,7 +41,9 @@ An empty extract **must not DELETE** existing `easter_eggs`. If the articles or 
 
 ### Extract
 
-Workers search **DuckDuckGo HTML**, fetch a few live articles, and send that text to **Ollama `llama3.1:8b`**. The model may extract only what is in the articles — it must not invent. Both worker pods share one Ollama host, so CPU will contend. There is no Reddit scrape, no IMDb HTML, and no OpenAI key.
+Workers search **DuckDuckGo HTML**, fetch a few live articles, and send that text to Ollama. The model may extract only what is in the articles — it must not invent. There is no Reddit scrape, no IMDb HTML, and no OpenAI key.
+
+**Prod Ollama (2026-08-23):** `llama3.1:8b` Q4_K_M (`46e0c10c039e`, 4.9 GB). Host is systemd Ollama **0.32.15** on **randomnumber03** (Precision 5810) at `http://100.85.130.58:11434`. Extract workers use `OLLAMA_HOST=http://100.85.130.58:11434` and `OLLAMA_MODEL=llama3.1:8b`. Inference is Vulkan on an AMD RX 580 (100% GPU, 33/33 layers). This is **not** a k3s pod. Ollama on randomnumber01 is stopped.
 
 ### Cache layers
 
@@ -70,7 +72,7 @@ flowchart TD
   w2 --> tmdb
   w1 --> articles[DuckDuckGo articles]
   w2 --> articles
-  w1 --> ollama[Ollama llama3.1:8b]
+  w1 --> ollama[Ollama llama3.1:8b Q4_K_M<br/>randomnumber03 :11434]
   w2 --> ollama
   w1 --> pg
   w2 --> pg
