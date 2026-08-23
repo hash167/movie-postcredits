@@ -63,6 +63,7 @@ def bind_context(
 
 
 def reset_context(tokens: list) -> None:
+    # ContextVar.reset needs the token from the matching var; just clear.
     request_id_var.set(None)
     tmdb_id_var.set(None)
 
