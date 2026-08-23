@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import List, Dict
 from src.database import DatabaseManager
 from src.config import settings
-from src.schema_compat import normalize_easter_eggs, worth_staying_to_bool
 
 
 class JSONExporter:
@@ -39,19 +38,32 @@ class JSONExporter:
                 "sceneCount": movie.get("scene_count", 0),
                 "midCredits": movie.get("mid_credits"),
                 "postCredits": movie.get("post_credits_desc"),
-                "worthStaying": worth_staying_to_bool(movie.get("worth_staying")),
+                "worthStaying": movie.get("worth_staying"),
                 "spoilerFreeHint": movie.get("spoiler_free_hint"),
                 "confidence": movie.get("source_confidence", "medium"),
             }
 
-        # Parse easter_eggs if it's a JSON string
         easter_eggs = movie.get("easter_eggs", [])
         if isinstance(easter_eggs, str) and easter_eggs:
             try:
                 easter_eggs = json.loads(easter_eggs)
             except json.JSONDecodeError:
                 easter_eggs = []
-        easter_eggs = normalize_easter_eggs(easter_eggs)
+        mapped = []
+        if isinstance(easter_eggs, list):
+            for egg in easter_eggs:
+                if isinstance(egg, str) and egg.strip():
+                    mapped.append({"detail": egg.strip(), "significance": ""})
+                    continue
+                if not isinstance(egg, dict):
+                    continue
+                detail = (egg.get("detail") or egg.get("description") or egg.get("title") or "").strip()
+                if not detail:
+                    continue
+                mapped.append({
+                    "detail": detail,
+                    "significance": str(egg.get("significance") or "")[:50],
+                })
 
         return {
             "id": movie["id"],
@@ -65,8 +77,10 @@ class JSONExporter:
             "popularity": float(pop) if pop else None,
             "imdbId": movie.get("imdb_id"),
             "postCredits": post_credits,
-            "easterEggs": easter_eggs if isinstance(easter_eggs, list) else [],
-            "redditDiscussionCount": movie.get("reddit_discussion_count"),
+            "easterEggs": mapped,
+            "insightDiscussionCount": movie.get("discussion_count"),
+            "discussionCount": movie.get("discussion_count"),
+            "redditDiscussionCount": movie.get("discussion_count"),
         }
 
     async def export_tier(self, tier: str) -> str:
@@ -148,9 +162,7 @@ class JSONExporter:
                         "title": movie["title"],
                         "year": movie["year"],
                         "sceneCount": movie["scene_count"],
-                        "worthStaying": worth_staying_to_bool(
-                            movie["worth_staying"]
-                        ),
+                        "worthStaying": movie["worth_staying"],
                     }
                 )
 
@@ -187,11 +199,10 @@ class JSONExporter:
             for row in rows:
                 movie_dict = dict(row)
 
-                # Live easter_eggs columns: title, description, significance.
-                # Never SELECT detail / confidence / source_url — they do not exist.
+                # Get easter eggs for this movie
                 query = (
-                    "SELECT title, description, significance, "
-                    "timestamp_minutes FROM easter_eggs WHERE movie_id = $1"
+                    "SELECT COALESCE(description, title) AS detail, "
+                    "significance FROM easter_eggs WHERE movie_id = $1"
                 )
                 eggs = await conn.fetch(query, movie_dict["id"])
 
@@ -202,17 +213,7 @@ class JSONExporter:
                         "year": movie_dict["year"],
                         "tier": movie_dict["tier"],
                         "posterPath": movie_dict["poster_path"],
-                        "easterEggs": [
-                            {
-                                "detail": (
-                                    egg["description"]
-                                    or egg["title"]
-                                    or ""
-                                ),
-                                "significance": egg["significance"],
-                            }
-                            for egg in eggs
-                        ],
+                        "easterEggs": [dict(egg) for egg in eggs],
                     }
                 )
 
