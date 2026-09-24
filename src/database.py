@@ -134,6 +134,46 @@ class DatabaseManager:
             )
             return [dict(row) for row in rows]
 
+    async def demote_stale_theater_movies(
+        self, keep_ids: List[int], fallback_tier: str = "recent"
+    ) -> int:
+        """Move theaters-tier rows not in keep_ids off the theaters list.
+
+        theaters-daily upserts current now_playing titles but historically never
+        cleared old tier='theaters' rows, so the export grew forever. Demote
+        anything no longer in today's TMDB now_playing set so export/UI only
+        show currently-in-theaters titles. Row data is kept for search.
+        """
+        ids = [int(x) for x in (keep_ids or []) if x is not None]
+        async with self.pool.acquire() as conn:
+            if ids:
+                result = await conn.execute(
+                    """
+                    UPDATE movies
+                    SET tier = $1, updated_at = $2
+                    WHERE tier = 'theaters' AND NOT (id = ANY($3::int[]))
+                    """,
+                    fallback_tier,
+                    datetime.now(),
+                    ids,
+                )
+            else:
+                # Empty now_playing — demote all theaters rows rather than
+                # wiping the catalog by accident via a failed fetch.
+                result = await conn.execute(
+                    """
+                    UPDATE movies
+                    SET tier = $1, updated_at = $2
+                    WHERE tier = 'theaters'
+                    """,
+                    fallback_tier,
+                    datetime.now(),
+                )
+        try:
+            return int(result.split()[-1])
+        except (AttributeError, ValueError, IndexError):
+            return 0
+
     async def get_movie_by_id(self, movie_id: int) -> Optional[Dict]:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(

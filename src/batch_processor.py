@@ -90,6 +90,16 @@ class BatchProcessor:
                 failed += 1
                 continue
 
+        # After theaters scrape: demote titles no longer in TMDB now_playing
+        # so export/UI stop listing historical theater rows forever.
+        if tier == "theaters":
+            keep_ids = [m.get("id") for m in movies if m.get("id") is not None]
+            demoted = await self.db.demote_stale_theater_movies(keep_ids)
+            print(
+                f"Demoted {demoted} stale theater movie(s); "
+                f"keeping {len(keep_ids)} current now_playing id(s)"
+            )
+
         # Log batch completion
         await self.db.log_batch_complete(batch_id, processed, failed)
 

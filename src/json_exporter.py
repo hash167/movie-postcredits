@@ -4,7 +4,7 @@ JSON exporter for movie and post-credits data by tier
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict
 from src.database import DatabaseManager
 from src.config import settings
@@ -75,6 +75,29 @@ class JSONExporter:
         print(f"Exporting tier '{tier}' to {filepath}")
 
         movies = await self.db.get_movies_by_tier(tier)
+        # theaters tier must reflect current now_playing membership only.
+        # demote_stale_theater_movies handles this at scrape time; as a
+        # safety net, drop theaters rows not touched in the last 3 days
+        # (covers a missed demote without hiding a same-day scrape).
+        if tier == "theaters":
+            cutoff = datetime.now() - timedelta(days=3)
+            before = len(movies)
+            filtered = []
+            for m in movies:
+                updated = m.get("updated_at")
+                if updated is None:
+                    filtered.append(m)
+                    continue
+                if getattr(updated, "tzinfo", None) is not None:
+                    updated = updated.replace(tzinfo=None)
+                if updated >= cutoff:
+                    filtered.append(m)
+            movies = filtered
+            if before != len(movies):
+                print(
+                    f"Theaters export safety filter: {before} -> {len(movies)} "
+                    f"(dropped stale updated_at)"
+                )
 
         export_data = {
             "tier": tier,
