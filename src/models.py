@@ -18,10 +18,10 @@ class PostCreditsScene(BaseModel):
     spoiler_free_hint: Optional[str]
 
 
-class RedditInsights(BaseModel):
+class MovieInsightsData(BaseModel):
     easter_eggs: List[EasterEgg]
     post_credits: PostCreditsScene
-    reddit_discussion_count: int
+    discussion_count: int
     community_rating: Optional[float] = None
     source_urls: List[str]
 
@@ -38,5 +38,9 @@ class EnhancedMovie(BaseModel):
     popularity: float = 0.0
     tier: str
     imdb_id: Optional[str] = None
-    reddit_insights: Optional[RedditInsights] = None
+    movie_insights: Optional[MovieInsightsData] = None
     last_updated: datetime = datetime.now()
+
+# Backward-compatible alias for older reddit_scraper imports
+RedditInsights = MovieInsightsData
+

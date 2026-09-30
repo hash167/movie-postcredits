@@ -81,13 +81,63 @@ class TMDBClient:
             data = response.json()
             return data["results"][0] if data.get("results") else None
 
+    async def search_movies(
+        self, query: str, year: Optional[int] = None
+    ) -> List[Dict]:
+        """Return up to 20 TMDB /search/movie hits. Does not mutate state."""
+        url = f"{self.base_url}/search/movie"
+        params = {"api_key": self.api_key, "query": query, "language": "en-US"}
+        if year:
+            params["year"] = year
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+        results = []
+        for item in (data.get("results") or [])[:20]:
+            release_date = item.get("release_date") or ""
+            year_val = None
+            if len(release_date) >= 4:
+                try:
+                    year_val = int(release_date[:4])
+                except ValueError:
+                    year_val = None
+            poster_path = None
+            if item.get("poster_path"):
+                poster_path = f"{self.image_base}{item['poster_path']}"
+            results.append({
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "year": year_val,
+                "poster_path": poster_path,
+                "overview": item.get("overview") or "",
+                "popularity": item.get("popularity", 0.0),
+            })
+        return results
+
     async def get_movie_details(self, movie_id: int) -> Optional[Dict]:
         url = f"{self.base_url}/movie/{movie_id}"
-        params = {"api_key": self.api_key, "language": "en-US"}
+        params = {
+            "api_key": self.api_key,
+            "language": "en-US",
+            "append_to_response": "keywords,credits",
+        }
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
             return response.json()
+
+    async def get_movie_credits(self, movie_id: int) -> List[Dict]:
+        """Return cast list for cast-grounding validation."""
+        if not movie_id or not self.api_key:
+            return []
+        url = f"{self.base_url}/movie/{movie_id}/credits"
+        params = {"api_key": self.api_key, "language": "en-US"}
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+        return list(data.get("cast") or [])
 
     def format_movie(self, movie_data: Dict, tier: str) -> Dict:
         release_date = movie_data.get("release_date")

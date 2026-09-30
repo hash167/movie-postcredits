@@ -255,7 +255,7 @@ Guidelines:
             insights = RedditInsights(
                 easter_eggs=easter_eggs,
                 post_credits=post_credits,
-                reddit_discussion_count=len(posts),
+                discussion_count=len(posts),
                 source_urls=[p["url"] for p in posts[:10]],
             )
 

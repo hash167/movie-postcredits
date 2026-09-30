@@ -5,7 +5,7 @@ Batch processor for collecting movie and post-credits data
 import asyncio
 from typing import Dict
 from src.tmdb_client import TMDBClient
-from src.reddit_scraper import RedditScraper
+from src.movie_insights import MovieInsights
 from src.database import DatabaseManager
 from src.models import EnhancedMovie
 
@@ -15,7 +15,7 @@ class BatchProcessor:
 
     def __init__(self):
         self.tmdb = TMDBClient()
-        self.reddit = RedditScraper()
+        self.insights = MovieInsights()
         self.db = DatabaseManager()
 
     async def initialize(self):
@@ -113,13 +113,19 @@ class BatchProcessor:
         # Format movie data
         formatted = self.tmdb.format_movie(details, tier)
 
-        # Search Reddit and IMDb for insights
+        # Search live articles and IMDb for insights
         year = formatted.get("year")
         imdb_id = formatted.get("imdb_id")
-        insights = await self.reddit.scrape_movie_insights(title, year, imdb_id)
+        insights = await self.insights.scrape_movie_insights(
+            title,
+            year,
+            imdb_id,
+            movie_id=movie_id,
+            overview=formatted.get("overview") or details.get("overview") or "",
+        )
 
         # Create EnhancedMovie object
-        enhanced_movie = EnhancedMovie(**formatted, reddit_insights=insights)
+        enhanced_movie = EnhancedMovie(**formatted, movie_insights=insights)
 
         # Save to database
         await self.db.upsert_movie(enhanced_movie)
@@ -130,7 +136,7 @@ class BatchProcessor:
             msg = f"Post-credits={has_scene}, Easter eggs={egg_count}"
             print(f"  ✓ Saved: {msg}")
         else:
-            print("  ✓ Saved (no Reddit insights)")
+            print("  ✓ Saved (no insights)")
 
     async def process_specific_movie(self, title: str, year: int = None):
         """Process a specific movie by title"""
@@ -181,8 +187,8 @@ class BatchProcessor:
                 # Get fresh data from TMDB
                 details = await self.tmdb.get_movie_details(movie["id"])
                 if details:
-                    # Scrape Reddit for new insights
-                    insights = await self.reddit.scrape_movie_insights(
+                    # Scrape live articles for new insights
+                    insights = await self.insights.scrape_movie_insights(
                         movie["title"], movie.get("year")
                     )
 
@@ -190,7 +196,7 @@ class BatchProcessor:
                     tier_val = movie.get("tier", "on-demand")
                     formatted = self.tmdb.format_movie(details, tier_val)
                     enhanced_movie = EnhancedMovie(
-                        **formatted, reddit_insights=insights
+                        **formatted, movie_insights=insights
                     )
                     await self.db.upsert_movie(enhanced_movie)
 
