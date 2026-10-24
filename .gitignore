@@ -62,3 +62,21 @@ kubeconfig
 secrets.yaml
 
 exports
+
+# --- secrets hygiene (2026-10-24) ---
+.env.*
+!.env.example
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*.kubeconfig
+kubeconfig*
+k3s.yaml
+*-secret.yaml
+*-secrets.yaml
+secrets.y*ml
+credentials.json
+*-creds.json
+*tunnel-token*
+gitleaks-report*.json

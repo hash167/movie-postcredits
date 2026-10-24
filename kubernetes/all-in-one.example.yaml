@@ -351,11 +351,22 @@ spec:
           done
       - name: wait-for-minio
         image: minio/mc:latest
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: MINIO_ROOT_USER
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: MINIO_ROOT_PASSWORD
         command:
         - sh
         - -c
         - |
-          until mc alias set myminio http://minio:9000 minioadmin changeme123 2>/dev/null; do
+          until mc alias set myminio http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" 2>/dev/null; do
             echo "Waiting for minio..."
             sleep 2
           done

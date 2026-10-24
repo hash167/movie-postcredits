@@ -51,7 +51,7 @@ echo -e "${YELLOW}Step 3: Applying CORS configuration...${NC}"
 
 kubectl exec $POD_NAME -n movie-api -- sh -c '
 # Setup alias
-mc alias set myminio http://localhost:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD
+mc alias set myminio http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
 
 # Apply CORS
 mc anonymous set-json /tmp/cors.json myminio/movies
