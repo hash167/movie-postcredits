@@ -45,7 +45,7 @@ class JsonFormatter(logging.Formatter):
             "time": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_text(record.getMessage()),  # tmdb-redact 2026-10-24
         }
         request_id = getattr(record, "request_id", None) or request_id_var.get()
         tmdb_id = getattr(record, "tmdb_id", None)
@@ -56,7 +56,7 @@ class JsonFormatter(logging.Formatter):
         if tmdb_id is not None:
             payload["tmdb_id"] = tmdb_id
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            payload["exc_info"] = redact_text(self.formatException(record.exc_info))
         return json.dumps(payload, default=str)
 
 
@@ -86,6 +86,261 @@ def get_logger(name: str = "movie-postcredits") -> logging.Logger:
         logger.setLevel(logging.INFO)
         logger.propagate = False
     return logger
+
+
+# --- secret redaction (tmdb-redact 2026-10-24) -------------------------------
+# Outbound TMDB calls carry the v3 key as ?api_key=..., and the httpx/FastAPI
+# instrumentations copy the full URL into span attributes (http.url / url.full
+# / url.query ...). Everything below masks credential-looking query params and
+# key=value pairs before spans leave the process and before log lines are
+# emitted. Masking is value-agnostic (no secret is compared or embedded here).
+import re as _re
+from urllib.parse import parse_qsl as _parse_qsl, urlencode as _urlencode, urlsplit as _urlsplit, urlunsplit as _urlunsplit
+
+REDACTED = "REDACTED"
+
+_SENSITIVE_NAME_RE = _re.compile(
+    r"(?:^|[_\-.])(?:api[_\-]?key|apikey|key|token|access[_\-]?token|refresh[_\-]?token|"
+    r"id[_\-]?token|auth|authorization|password|passwd|pwd|secret|client[_\-]?secret|"
+    r"signature|sig|session|sessionid|credential|credentials|private[_\-]?key)$",
+    _re.IGNORECASE,
+)
+
+# key=value pairs inside free text (URLs in exception messages, log lines ...).
+_KV_RE = _re.compile(
+    r"(?P<k>\b(?:[A-Za-z0-9]+[_\-.])*(?:api[_\-]?key|apikey|key|token|access[_\-]?token|"
+    r"refresh[_\-]?token|id[_\-]?token|password|passwd|pwd|secret|client[_\-]?secret|"
+    r"signature|sig|session|sessionid|credentials?|private[_\-]?key))"
+    r"(?P<sep>=|%3D)(?P<v>[^&\s'\"<>#,;)\]}]+)",
+    _re.IGNORECASE,
+)
+_AUTH_HDR_RE = _re.compile(r"(?P<p>\b(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/=\-]{8,}", _re.IGNORECASE)
+_USERINFO_RE = _re.compile(r"(?P<s>\b[a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@")
+
+# Span / event attributes that may hold URLs, queries or free text.
+_URLISH_ATTRS = frozenset({
+    "http.url", "url.full", "http.target", "url.query", "url.original",
+    "http.request.url", "net.peer.url", "db.statement", "db.query.text",
+})
+
+
+def _sensitive_name(name: str) -> bool:
+    return bool(name) and bool(_SENSITIVE_NAME_RE.search(name))
+
+
+def redact_text(value):
+    """Mask key/token/password/secret values in arbitrary text."""
+    if not isinstance(value, str) or not value:
+        return value
+    out = _KV_RE.sub(lambda m: m.group("k") + m.group("sep") + REDACTED, value)
+    out = _AUTH_HDR_RE.sub(lambda m: m.group("p") + REDACTED, out)
+    out = _USERINFO_RE.sub(lambda m: m.group("s") + REDACTED + "@", out)
+    return out
+
+
+def redact_url(value):
+    """Mask sensitive query params (and userinfo) in a URL or bare query string."""
+    if not isinstance(value, str) or not value:
+        return value
+    try:
+        if "://" in value or value.startswith("/"):
+            parts = _urlsplit(value)
+            netloc = parts.netloc
+            if "@" in netloc:
+                netloc = REDACTED + "@" + netloc.rsplit("@", 1)[1]
+            query = parts.query
+            if query:
+                pairs = _parse_qsl(query, keep_blank_values=True)
+                if any(_sensitive_name(k) for k, _ in pairs):
+                    query = _urlencode(
+                        [(k, REDACTED if _sensitive_name(k) else v) for k, v in pairs],
+                        safe="*",
+                    )
+            return redact_text(_urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment)))
+        if "=" in value:  # bare query string (url.query)
+            pairs = _parse_qsl(value.lstrip("?"), keep_blank_values=True)
+            if pairs and any(_sensitive_name(k) for k, _ in pairs):
+                return _urlencode(
+                    [(k, REDACTED if _sensitive_name(k) else v) for k, v in pairs], safe="*"
+                )
+    except Exception:
+        pass
+    return redact_text(value)
+
+
+def redact_attributes(attrs):
+    """Return a plain dict with URL/text attrs masked; None if nothing changed."""
+    if not attrs:
+        return None
+    changed = False
+    out = {}
+    for key, val in attrs.items():
+        new = val
+        if isinstance(val, str):
+            if key in _URLISH_ATTRS:
+                new = redact_url(val)
+            elif _sensitive_name(key.rsplit(".", 1)[-1]):
+                new = REDACTED
+            else:
+                new = redact_text(val)
+        elif isinstance(val, (list, tuple)) and val and all(isinstance(v, str) for v in val):
+            new = tuple(redact_text(v) for v in val)
+            if tuple(val) == new:
+                new = val
+        if new is not val and new != val:
+            changed = True
+        out[key] = new
+    return out if changed else None
+
+
+class RedactingSpanExporter:
+    """Wraps a SpanExporter; masks secrets in attributes, events and status."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def _clean(self, span):
+        try:
+            from opentelemetry.sdk.trace import Event, ReadableSpan
+
+            attrs = redact_attributes(span.attributes)
+            events = list(span.events or ())
+            new_events = []
+            ev_changed = False
+            for ev in events:
+                ev_attrs = redact_attributes(ev.attributes)
+                if ev_attrs is not None:
+                    ev_changed = True
+                    new_events.append(Event(ev.name, ev_attrs, ev.timestamp))
+                else:
+                    new_events.append(ev)
+            status = span.status
+            desc = getattr(status, "description", None)
+            new_desc = redact_text(desc) if desc else desc
+            if attrs is None and not ev_changed and new_desc == desc:
+                return span
+            if new_desc != desc:
+                status = Status(status.status_code, new_desc)
+            return ReadableSpan(
+                name=span.name,
+                context=span.context,
+                parent=span.parent,
+                resource=span.resource,
+                attributes=attrs if attrs is not None else span.attributes,
+                events=new_events,
+                links=span.links,
+                kind=span.kind,
+                status=status,
+                start_time=span.start_time,
+                end_time=span.end_time,
+                instrumentation_scope=getattr(span, "instrumentation_scope", None),
+            )
+        except Exception:
+            # Never ship a span we failed to sanitize if it looks sensitive.
+            try:
+                blob = repr(dict(span.attributes or {}))
+                if redact_text(blob) != blob:
+                    return None
+            except Exception:
+                return None
+            return span
+
+    def export(self, spans):
+        cleaned = [c for c in (self._clean(s) for s in spans) if c is not None]
+        return self._inner.export(cleaned)
+
+    def shutdown(self):
+        return self._inner.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000):
+        fn = getattr(self._inner, "force_flush", None)
+        return fn(timeout_millis) if fn else True
+
+
+def _httpx_request_hook(span, request, *args, **kwargs):
+    """Overwrite URL attrs as early as possible (exporter still re-masks)."""
+    try:
+        if span is None or not span.is_recording():
+            return
+        url = None
+        if hasattr(request, "url"):
+            url = str(request.url)
+        elif isinstance(request, tuple) and len(request) >= 2:  # RequestInfo
+            url = str(request[1])
+        if url:
+            masked = redact_url(url)
+            span.set_attribute("http.url", masked)
+            if "url.full" in (getattr(span, "attributes", None) or {}):
+                span.set_attribute("url.full", masked)
+    except Exception:
+        pass
+
+
+async def _httpx_async_request_hook(span, request, *args, **kwargs):
+    _httpx_request_hook(span, request)
+
+
+_log_redaction_installed = False
+
+
+def install_log_redaction() -> None:
+    """Mask secrets in every log record (message, args, traceback text)."""
+    global _log_redaction_installed
+    if _log_redaction_installed:
+        return
+    _log_redaction_installed = True
+    old_factory = logging.getLogRecordFactory()
+
+    def factory(*args, **kwargs):
+        record = old_factory(*args, **kwargs)
+        try:
+            msg = record.getMessage()
+            masked = redact_text(msg)
+            if masked != msg:
+                record.msg = masked
+                record.args = None
+            if record.exc_info and not record.exc_text:
+                import traceback as _tb
+
+                text = "".join(_tb.format_exception(*record.exc_info)).rstrip("\n")
+                record.exc_text = redact_text(text)
+        except Exception:
+            pass
+        return record
+
+    logging.setLogRecordFactory(factory)
+
+
+class _RedactingStream:
+    """sys.stdout/sys.stderr proxy so print()/traceback output is masked too."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def write(self, s):
+        try:
+            if isinstance(s, str):
+                s = redact_text(s)
+        except Exception:
+            pass
+        return self._inner.write(s)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def install_stream_redaction() -> None:
+    import sys as _sys
+
+    for _name in ("stdout", "stderr"):
+        _cur = getattr(_sys, _name, None)
+        if _cur is not None and not isinstance(_cur, _RedactingStream):
+            setattr(_sys, _name, _RedactingStream(_cur))
+
+
+install_log_redaction()
+install_stream_redaction()
+# --- end secret redaction ----------------------------------------------------
 
 
 def _parse_resource_attributes(raw: str) -> Dict[str, str]:
@@ -191,9 +446,11 @@ def init(service_name: Optional[str] = None) -> bool:
     tracer_provider = TracerProvider(resource=resource)
     tracer_provider.add_span_processor(
         BatchSpanProcessor(
-            OTLPSpanExporter(
-                endpoint=_otlp_signal_endpoint(endpoint, "traces"),
-                headers=headers,
+            RedactingSpanExporter(  # tmdb-redact 2026-10-24
+                OTLPSpanExporter(
+                    endpoint=_otlp_signal_endpoint(endpoint, "traces"),
+                    headers=headers,
+                )
             )
         )
     )
@@ -222,7 +479,10 @@ def _instrument_libraries() -> None:
     try:
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
-        HTTPXClientInstrumentor().instrument()
+        HTTPXClientInstrumentor().instrument(  # tmdb-redact 2026-10-24
+            request_hook=_httpx_request_hook,
+            async_request_hook=_httpx_async_request_hook,
+        )
     except Exception:
         pass
     try:

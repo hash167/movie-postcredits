@@ -1,3 +1,5 @@
+import os
+
 import httpx
 from typing import List, Dict, Optional
 from src.config import settings
@@ -7,7 +9,21 @@ class TMDBClient:
     def __init__(self):
         self.base_url = "https://api.themoviedb.org/3"
         self.api_key = settings.tmdb_api_key
+        self.read_token = os.getenv("TMDB_READ_ACCESS_TOKEN", "").strip()
         self.image_base = "https://image.tmdb.org/t/p/w500"
+
+    def _auth(self, params: Dict) -> Dict:
+        """httpx kwargs for TMDB auth (tmdb-redact 2026-10-24).
+
+        Prefers a v4 read access token (TMDB_READ_ACCESS_TOKEN) sent as an
+        Authorization header so no credential appears in URLs; otherwise falls
+        back to the v3 ?api_key= param (masked from telemetry by src.telemetry).
+        """
+        params = dict(params)
+        if self.read_token:
+            params.pop("api_key", None)
+            return {"params": params, "headers": {"Authorization": f"Bearer {self.read_token}"}}
+        return {"params": params}
 
     async def get_movies_in_theaters(self, limit: int = 50) -> List[Dict]:
         movies = []
@@ -19,7 +35,7 @@ class TMDBClient:
                 "region": "US",
                 "page": 1,
             }
-            response = await client.get(url, params=params)
+            response = await client.get(url, **self._auth(params))
             response.raise_for_status()
             data = response.json()
             movies.extend(data["results"])
@@ -35,7 +51,7 @@ class TMDBClient:
                     "language": "en-US",
                     "page": page
                 }
-                response = await client.get(url, params=params)
+                response = await client.get(url, **self._auth(params))
                 response.raise_for_status()
                 data = response.json()
                 movies.extend(data["results"])
@@ -60,7 +76,7 @@ class TMDBClient:
                         "sort_by": "popularity.desc",
                         "page": page,
                     }
-                    response = await client.get(url, params=params)
+                    response = await client.get(url, **self._auth(params))
                     response.raise_for_status()
                     data = response.json()
                     if not data["results"]:
@@ -76,7 +92,7 @@ class TMDBClient:
         if year:
             params["year"] = year
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params)
+            response = await client.get(url, **self._auth(params))
             response.raise_for_status()
             data = response.json()
             return data["results"][0] if data.get("results") else None
@@ -90,7 +106,7 @@ class TMDBClient:
         if year:
             params["year"] = year
         async with httpx.AsyncClient(timeout=8.0) as client:
-            response = await client.get(url, params=params)
+            response = await client.get(url, **self._auth(params))
             response.raise_for_status()
             data = response.json()
         results = []
@@ -123,18 +139,18 @@ class TMDBClient:
             "append_to_response": "keywords,credits",
         }
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params)
+            response = await client.get(url, **self._auth(params))
             response.raise_for_status()
             return response.json()
 
     async def get_movie_credits(self, movie_id: int) -> List[Dict]:
         """Return cast list for cast-grounding validation."""
-        if not movie_id or not self.api_key:
+        if not movie_id or not (self.api_key or self.read_token):
             return []
         url = f"{self.base_url}/movie/{movie_id}/credits"
         params = {"api_key": self.api_key, "language": "en-US"}
         async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.get(url, params=params)
+            response = await client.get(url, **self._auth(params))
             response.raise_for_status()
             data = response.json()
         return list(data.get("cast") or [])
