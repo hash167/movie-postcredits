@@ -1,3 +1,4 @@
+# Move to .github/workflows/gitleaks.yml to enable (the automation token used to open this PR lacks the GitHub `workflow` scope).
 name: gitleaks
 
 on:
