@@ -469,7 +469,7 @@ Configured in `kubernetes/all-in-one.yaml`:
 
 ```yaml
 # Database (line 67)
-DATABASE_URL: postgresql://movieuser:admin@postgres:5432/moviedb
+DATABASE_URL: postgresql://movieuser:<POSTGRES_PASSWORD>@postgres:5432/moviedb
 
 # API Keys (lines 70-71)
 OPENAI_API_KEY: "your-key-here"
@@ -478,8 +478,8 @@ TMDB_API_KEY: "your-key-here"
 # MinIO (lines 74-78)
 S3_ENDPOINT: http://minio:9000
 S3_BUCKET: movies
-S3_ACCESS_KEY: minioadmin
-S3_SECRET_KEY: minioadmin123
+S3_ACCESS_KEY: <MINIO_ROOT_USER>
+S3_SECRET_KEY: <MINIO_ROOT_PASSWORD>
 ```
 
 ---
