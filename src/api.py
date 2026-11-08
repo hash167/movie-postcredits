@@ -6,80 +6,186 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import asyncio
+import os
+import time
 
 from src.database import DatabaseManager
 from src.tmdb_client import TMDBClient
-from src.reddit_scraper import RedditScraper
+from src.movie_insights import MovieInsights
 from src.sync_job import sync_job
+from src import telemetry  # otel-fix 2026-10-18: restore Honeycomb wiring
 
 
 def _parse_easter_eggs(easter_eggs):
-    """Parse easter eggs if they're a JSON string"""
+    """Normalize eggs to [{detail, significance}] from live columns."""
     if isinstance(easter_eggs, str) and easter_eggs:
         try:
-            return json.loads(easter_eggs)
+            easter_eggs = json.loads(easter_eggs)
         except json.JSONDecodeError:
             return []
-    return easter_eggs if isinstance(easter_eggs, list) else []
+    if not isinstance(easter_eggs, list):
+        return []
+    out = []
+    for egg in easter_eggs:
+        if isinstance(egg, str):
+            detail = egg.strip()
+            if detail:
+                out.append({"detail": detail, "significance": ""})
+            continue
+        if not isinstance(egg, dict):
+            continue
+        detail = (
+            egg.get("detail")
+            or egg.get("description")
+            or egg.get("title")
+            or ""
+        )
+        detail = str(detail).strip()
+        if not detail:
+            continue
+        significance = str(egg.get("significance") or "")
+        out.append({"detail": detail, "significance": significance})
+    return out
 
-# Initialize FastAPI app
+
+def _post_credits_payload(row):
+    if not row:
+        return None
+    if row.get("has_scene") is None and row.get("source_confidence") == "processing":
+        return {"confidence": "processing"}
+    if row.get("has_scene") is None:
+        return None
+    return {
+        "hasScene": bool(row.get("has_scene", False)),
+        "sceneCount": row.get("scene_count", 0) or 0,
+        "midCredits": row.get("mid_credits"),
+        "postCredits": row.get("post_credits_desc"),
+        "worthStaying": row.get("worth_staying"),
+        "spoilerFreeHint": row.get("spoiler_free_hint"),
+        "confidence": row.get("source_confidence", "medium"),
+    }
+
+
+def _serialize_movie(row, extra=None):
+    extra = extra or {}
+    vote_avg = row.get("vote_average")
+    pop = row.get("popularity")
+    payload = {
+        "id": row["id"],
+        "title": row["title"],
+        "year": row.get("year"),
+        "posterPath": row.get("poster_path") or row.get("posterPath"),
+        "postCredits": _post_credits_payload(row),
+        "easterEggs": _parse_easter_eggs(row.get("easter_eggs", [])),
+        "cached": extra.get("cached", True),
+        "source": extra.get("source", "database"),
+    }
+    if "release_date" in row or "releaseDate" in row:
+        payload["releaseDate"] = row.get("releaseDate") or row.get("release_date")
+    if "runtime_minutes" in row or "runtimeMinutes" in row:
+        payload["runtimeMinutes"] = row.get("runtimeMinutes") or row.get("runtime_minutes")
+    if "overview" in row:
+        payload["overview"] = row.get("overview")
+    if vote_avg is not None:
+        payload["voteAverage"] = float(vote_avg) if vote_avg else None
+    if pop is not None:
+        payload["popularity"] = float(pop) if pop else None
+    if row.get("tier") is not None:
+        payload["tier"] = row.get("tier")
+    if row.get("imdb_id") is not None or row.get("imdbId") is not None:
+        payload["imdbId"] = row.get("imdbId") or row.get("imdb_id")
+    disc = row.get("discussion_count")
+    if disc is None:
+        disc = row.get("insight_discussion_count")
+    if disc is not None:
+        payload["insightDiscussionCount"] = disc
+        payload["discussionCount"] = disc
+        # compat: frontend export JSON still has redditDiscussionCount
+        payload["redditDiscussionCount"] = disc
+    if extra.get("message"):
+        payload["message"] = extra["message"]
+    job_status = extra.get("jobStatus")
+    if job_status is None:
+        job_status = row.get("job_status") or row.get("jobStatus")
+    if job_status:
+        payload["jobStatus"] = job_status
+        payload["extractStatus"] = job_status
+    return payload
+
+
+def _egg_count(row):
+    return len(_parse_easter_eggs(row.get("easter_eggs", []) if row else []))
+
+
+def _has_credits(row):
+    return bool(row and row.get("has_scene"))
+
+
+def _needs_insights(row):
+    """Need extract when there are 0 eggs. TMDB credits alone are not done."""
+    if not row:
+        return True
+    return _egg_count(row) == 0
+
+
 app = FastAPI(
     title="Movie Post-Credits API",
     description="API for post-credits scenes and easter eggs",
     version="2.0.0",
 )
 
-# Add CORS middleware
-# Configure CORS origins from environment variable for production
-import os
-cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080").split(",")
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,  # Configured from environment variable
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
-    max_age=3600,  # Cache preflight requests for 1 hour
+    max_age=3600,
 )
+app.add_middleware(telemetry.RequestTelemetryMiddleware)  # otel-fix 2026-10-18
 
-# Initialize managers
 db = DatabaseManager()
 tmdb = TMDBClient()
-reddit_scraper = RedditScraper()
+insights = MovieInsights()
 
 
 class SearchRequest(BaseModel):
     query: str
     year: Optional[int] = None
+    movie_id: Optional[int] = None
 
 
 @app.on_event("startup")
 async def startup():
-    """Initialize database connection and start background sync job"""
+    _otel_enabled = telemetry.init("movie-postcredits")  # otel-fix 2026-10-18
+    telemetry.instrument_fastapi(app)
+    print(f"telemetry_init enabled={_otel_enabled}", flush=True)
     await db.connect()
-    # Start background sync job
     asyncio.create_task(sync_job.start())
     print("✅ Background sync job started (runs every 5 minutes)")
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    """Stop background sync job and close database connection"""
     await sync_job.stop()
     await db.close()
 
 
 @app.get("/")
 def read_root():
-    """Root endpoint"""
     return {
         "message": "Movie Post-Credits & Easter Eggs API",
         "version": "2.0.0",
         "endpoints": {
-            "search": "POST /search",
+            "search": "GET /search?q=  |  POST /search",
             "movie": "GET /movie/{movie_id}",
             "movies_by_tier": "GET /movies/tier/{tier}",
             "stats": "GET /stats",
@@ -87,195 +193,290 @@ def read_root():
     }
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+_SEARCH_TTL = 600
+_SEARCH_MAX = 256
+_search_mem = {}
+_search_inflight = {}
+
+
+def _purge_search_cache(now: float) -> None:
+    """Drop expired search entries, then the soonest deadline past the cap."""
+    expired = [key for key, (deadline, _payload) in _search_mem.items() if deadline <= now]
+    for key in expired:
+        _search_mem.pop(key, None)
+    while len(_search_mem) > _SEARCH_MAX:
+        oldest = min(_search_mem, key=lambda key: _search_mem[key][0])
+        _search_mem.pop(oldest, None)
+
+
+def _search_key(query: str, year):
+    return f"{query.casefold()}|{year or ''}"
+
+
+def _hits_to_results(hits):
+    return [
+        {
+            "id": h.get("id"),
+            "title": h.get("title"),
+            "year": h.get("year"),
+            "posterPath": h.get("poster_path") or h.get("posterPath"),
+            "overview": h.get("overview") or "",
+        }
+        for h in hits
+    ]
+
+
+async def _local_movie_hits(query: str, year=None):
+    """Prefix/substring match in Postgres so search still works if TMDB is down."""
+    try:
+        async with db.pool.acquire() as conn:
+            if year:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, title, year, poster_path, overview
+                    FROM movies
+                    WHERE title ILIKE $1 AND year = $2
+                    ORDER BY popularity DESC NULLS LAST
+                    LIMIT 20
+                    """,
+                    f"%{query}%",
+                    year,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, title, year, poster_path, overview
+                    FROM movies
+                    WHERE title ILIKE $1
+                    ORDER BY popularity DESC NULLS LAST
+                    LIMIT 20
+                    """,
+                    f"%{query}%",
+                )
+        return [
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "year": r["year"],
+                "posterPath": r["poster_path"],
+                "overview": r["overview"] or "",
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"local search failed: {e}")
+        return []
+
+
+async def _tmdb_list(query: str, year):
+    hits = await tmdb.search_movies(query, year)
+    return _hits_to_results(hits)
+
+
+@app.get("/search")
+async def search_movies_list(q: str = "", query: str = "", year: Optional[int] = None):
+    """List search hits. Memory cache + single-flight, then TMDB, then local DB."""
+    query = (query or q or "").strip()
+    if not query:
+        return {"query": query, "count": 0, "results": []}
+    key = _search_key(query, year)
+    now = time.time()
+    _purge_search_cache(now)
+    cached = _search_mem.get(key)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    loop = asyncio.get_event_loop()
+    fut = _search_inflight.get(key)
+    if fut is None:
+        fut = loop.create_future()
+        _search_inflight[key] = fut
+
+        async def _fill():
+            try:
+                try:
+                    results = await _tmdb_list(query, year)
+                except Exception as e:
+                    print(f"TMDB list search failed: {e}")
+                    results = await _local_movie_hits(query, year)
+                    if not results:
+                        raise HTTPException(
+                            status_code=503, detail="Search backend unavailable"
+                        )
+                payload = {"query": query, "count": len(results), "results": results}
+                _search_mem[key] = (now + _SEARCH_TTL, payload)
+                _purge_search_cache(now)
+                if not fut.done():
+                    fut.set_result(payload)
+            except Exception as e:
+                if not fut.done():
+                    fut.set_exception(e)
+            finally:
+                _search_inflight.pop(key, None)
+
+        asyncio.create_task(_fill())
+
+    try:
+        return await fut
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"search wait failed: {e}")
+        raise HTTPException(status_code=503, detail="Search backend unavailable")
+
+
+def _poster_url(movie_data):
+    poster = movie_data.get("poster_path") or movie_data.get("posterPath")
+    if not poster:
+        return None
+    if str(poster).startswith("http"):
+        return poster
+    return f"{tmdb.image_base}{poster}"
+
+
+def _year_from(movie_data, fallback=None):
+    if movie_data.get("year"):
+        try:
+            return int(movie_data["year"])
+        except (TypeError, ValueError):
+            pass
+    release_date = movie_data.get("release_date") or ""
+    if len(release_date) >= 4:
+        try:
+            return int(release_date[:4])
+        except ValueError:
+            pass
+    return fallback
+
+
+async def _resolve_tmdb(request: SearchRequest):
+    if request.movie_id:
+        details = await tmdb.get_movie_details(request.movie_id)
+        if details:
+            return details
+    movie_data = await tmdb.search_movie(request.query, request.year)
+    if movie_data and request.movie_id and movie_data.get("id") != request.movie_id:
+        details = await tmdb.get_movie_details(request.movie_id)
+        if details:
+            return details
+    return movie_data
+
+
+async def _save_placeholder(movie_data, year, poster_url, tier="on-demand"):
+    from src.models import EnhancedMovie
+
+    movie_obj = EnhancedMovie(
+        id=movie_data["id"],
+        title=movie_data["title"],
+        year=year,
+        release_date=movie_data.get("release_date"),
+        runtime_minutes=movie_data.get("runtime") or 0,
+        poster_path=poster_url,
+        overview=movie_data.get("overview", ""),
+        vote_average=movie_data.get("vote_average", 0.0),
+        popularity=movie_data.get("popularity", 0.0),
+        imdb_id=movie_data.get("imdb_id"),
+        tier=tier,
+    )
+    await db.upsert_movie(movie_obj)
+
+
 @app.post("/search")
 async def search_movie(request: SearchRequest):
     """
-    Search for a movie and return post-credits info
-    - First checks database (cached)
-    - If not found, triggers background processing and returns placeholder
+    Single-title detail. Accepts optional movie_id so a list tap opens
+    the tapped title. If insights are needed, enqueue an extract_jobs
+    row and return a processing payload immediately so Cloudflare /
+    nginx proxies do not time out. The extract worker runs Ollama.
     """
-    # Search TMDB
-    movie_data = await tmdb.search_movie(request.query, request.year)
-
+    movie_data = await _resolve_tmdb(request)
     if not movie_data:
         raise HTTPException(status_code=404, detail="Movie not found")
 
     movie_id = movie_data["id"]
+    year = _year_from(movie_data, request.year)
+    poster_url = _poster_url(movie_data)
 
-    # Check if we have it in database
     cached = await db.get_movie_by_id(movie_id)
+    if cached and not _needs_insights(cached):
+        job_status = await db.get_extract_job_status(movie_id)
+        return _serialize_movie(
+            cached, {"cached": True, "source": "database", "jobStatus": job_status}
+        )
 
-    if cached:
-        return {
-            "id": cached["id"],
-            "title": cached["title"],
-            "year": cached["year"],
-            "posterPath": cached["poster_path"],
-            "postCredits": (
-                {
-                    "hasScene": cached.get("has_scene", False),
-                    "sceneCount": cached.get("scene_count", 0),
-                    "worthStaying": cached.get("worth_staying"),
-                    "spoilerFreeHint": cached.get("spoiler_free_hint"),
-                    "confidence": cached.get("source_confidence", "medium"),
-                }
-                if cached.get("has_scene") is not None
-                else None
-            ),
-            "easterEggs": _parse_easter_eggs(cached.get("easter_eggs", [])),
-            "cached": True,
-            "source": "database",
-        }
-
-    # Not in database - trigger background scraping and save to DB
-    from src.models import EnhancedMovie
-    
-    release_date = movie_data.get("release_date")
-    year = int(release_date[:4]) if release_date else None
-
-    poster = movie_data.get("poster_path")
-    poster_url = f"{tmdb.image_base}{poster}" if poster else None
-
-    # Create movie object and trigger processing in background
-    async def process_movie_background():
+    if not cached:
         try:
-            print(f"\n{'='*60}")
-            print(f"Background processing: {movie_data['title']} (ID: {movie_id})")
-            print(f"{'='*60}")
-            
-            # Get full movie details
-            full_movie = await tmdb.get_movie_details(movie_id)
-            
-            # Create EnhancedMovie object
-            movie_obj = EnhancedMovie(
-                id=full_movie["id"],
-                title=full_movie["title"],
-                year=year,
-                release_date=full_movie.get("release_date"),
-                runtime_minutes=full_movie.get("runtime", 0),
-                poster_path=poster_url,
-                overview=full_movie.get("overview", ""),
-                vote_average=full_movie.get("vote_average", 0.0),
-                popularity=full_movie.get("popularity", 0.0),
-                imdb_id=full_movie.get("imdb_id"),
-                tier="on-demand",
-            )
-            
-            # Scrape Reddit and IMDb, then analyze
-            print(f"Scraping Reddit + IMDb for: {movie_obj.title} {movie_obj.year}")
-            reddit_insights = await reddit_scraper.scrape_movie_insights(
-                movie_obj.title, movie_obj.year, movie_obj.imdb_id
-            )
-            
-            if reddit_insights:
-                print(f"✓ Found insights: {reddit_insights.reddit_discussion_count} discussions")
-                print(f"✓ Easter eggs: {len(reddit_insights.easter_eggs)}")
-                print(f"✓ Post-credits: {reddit_insights.post_credits.has_scene}")
-                movie_obj.reddit_insights = reddit_insights
-            else:
-                print("⚠ No Reddit insights found")
-            
-            # Save everything to database
-            await db.upsert_movie(movie_obj)
-            print(f"✓ Saved to database")
-            
-            # Check if movie has content worth exporting
-            has_content = False
-            if reddit_insights:
-                has_content = (reddit_insights.post_credits.has_scene or 
-                              len(reddit_insights.easter_eggs) > 0)
-            
-            # Export and upload to MinIO if has content
-            if has_content:
-                print(f"📤 Exporting to MinIO (has content)...")
-                from src.json_exporter import JSONExporter
-                from src.storage_uploader import StorageUploader
-                
-                exporter = JSONExporter()
-                uploader = StorageUploader()
-                
-                await exporter.initialize()
-                try:
-                    # Export on-demand tier
-                    filepath = await exporter.export_tier("on-demand")
-                    # Upload to MinIO
-                    await uploader.upload_file(filepath)
-                    print(f"✓ Exported and uploaded to MinIO")
-                finally:
-                    await exporter.close()
-            
-            print(f"{'='*60}\n")
-                
+            await _save_placeholder(movie_data, year, poster_url)
         except Exception as e:
-            print(f"❌ Error processing movie {movie_id}: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    # Start processing in background (fire and forget)
-    asyncio.create_task(process_movie_background())
+            print(f"placeholder save failed: {e}")
 
-    msg = "Movie found! Analyzing post-credits info... "
-    msg += "Check back in 30-60 seconds."
+    # Do not await the live DDG+Ollama extract — proxy timeouts are shorter
+    # than the pipeline. GET /movie/{id} is the poll target.
+    # Only the extract worker runs Ollama; enqueue is idempotent.
+    # Search must kick extract even when TMDB already flagged credits.
+    # Do not requeue a finished 0-egg job (Reanalyze uses refresh=True).
+    await db.enqueue_extract(
+        movie_id,
+        movie_data["title"],
+        year,
+        refresh=False,
+        requeue_if_done=False,
+    )
 
-    return {
+    latest = await db.get_movie_by_id(movie_id)
+    job_status = await db.get_extract_job_status(movie_id)
+    base = latest or {
         "id": movie_id,
         "title": movie_data["title"],
         "year": year,
-        "posterPath": poster_url,
-        "postCredits": {"confidence": "processing"},
-        "cached": False,
-        "source": "processing",
-        "message": msg,
+        "poster_path": poster_url,
+        "has_scene": None,
+        "source_confidence": "processing",
+        "easter_eggs": [],
     }
+    if job_status in ("done", "failed"):
+        return _serialize_movie(
+            base,
+            {
+                "cached": True,
+                "source": "database",
+                "jobStatus": job_status,
+            },
+        )
+    return _serialize_movie(
+        base,
+        {
+            "cached": False,
+            "source": "processing",
+            "jobStatus": job_status or "queued",
+            "message": (
+                "Movie found! Fetching live writeups and extracting with "
+                "Ollama... Check back in a minute."
+            ),
+        },
+    )
 
 
 @app.get("/movie/{movie_id}")
 async def get_movie(movie_id: int):
     """Get detailed information about a specific movie"""
     movie = await db.get_movie_by_id(movie_id)
-
     if not movie:
         raise HTTPException(status_code=404, detail="Movie not found")
-
-    vote_avg = movie.get("vote_average")
-    pop = movie.get("popularity")
-
-    post_credits = None
-    if movie.get("has_scene") is not None:
-        post_credits = {
-            "hasScene": movie.get("has_scene", False),
-            "sceneCount": movie.get("scene_count", 0),
-            "midCredits": movie.get("mid_credits"),
-            "postCredits": movie.get("post_credits_desc"),
-            "worthStaying": movie.get("worth_staying"),
-            "spoilerFreeHint": movie.get("spoiler_free_hint"),
-            "confidence": movie.get("source_confidence", "medium"),
-        }
-
-    return {
-        "id": movie["id"],
-        "title": movie["title"],
-        "year": movie["year"],
-        "releaseDate": movie.get("release_date"),
-        "runtimeMinutes": movie.get("runtime_minutes"),
-        "posterPath": movie.get("poster_path"),
-        "overview": movie.get("overview"),
-        "voteAverage": float(vote_avg) if vote_avg else None,
-        "popularity": float(pop) if pop else None,
-        "tier": movie.get("tier"),
-        "imdbId": movie.get("imdb_id"),
-        "postCredits": post_credits,
-        "easterEggs": _parse_easter_eggs(movie.get("easter_eggs", [])),
-        "redditDiscussionCount": movie.get("reddit_discussion_count"),
-        "cached": True,
-    }
+    job_status = await db.get_extract_job_status(movie_id)
+    return _serialize_movie(
+        movie, {"cached": True, "source": "database", "jobStatus": job_status}
+    )
 
 
 @app.get("/movies/tier/{tier}")
 async def get_movies_by_tier(tier: str):
-    """Get all movies in a specific tier"""
     movies = await db.get_movies_by_tier(tier)
-
     return {
         "tier": tier,
         "movieCount": len(movies),
@@ -285,17 +486,8 @@ async def get_movies_by_tier(tier: str):
                 "title": m["title"],
                 "year": m["year"],
                 "posterPath": m.get("poster_path"),
-                "postCredits": (
-                    {
-                        "hasScene": m.get("has_scene", False),
-                        "sceneCount": m.get("scene_count", 0),
-                        "worthStaying": m.get("worth_staying"),
-                        "spoilerFreeHint": m.get("spoiler_free_hint"),
-                    }
-                    if m.get("has_scene") is not None
-                    else None
-                ),
-                "easterEggs": m.get("easter_eggs", []),
+                "postCredits": _post_credits_payload(m),
+                "easterEggs": _parse_easter_eggs(m.get("easter_eggs", [])),
             }
             for m in movies
         ],
@@ -305,151 +497,86 @@ async def get_movies_by_tier(tier: str):
 
 @app.post("/movie/{movie_id}/refresh")
 async def refresh_movie_analysis(movie_id: int):
-    """
-    Re-analyze a movie with fresh Reddit + IMDb data
-    Only allowed if last analysis was > 15 minutes ago
-    """
-    # Check if movie exists
+    """Re-run the live articles + Ollama pipeline for a movie."""
     movie = await db.get_movie_by_id(movie_id)
     if not movie:
         raise HTTPException(status_code=404, detail="Movie not found")
-    
-    # Check when it was last scraped
+
     async with db.pool.acquire() as conn:
         last_scraped = await conn.fetchval(
-            "SELECT scraped_at FROM reddit_insights WHERE movie_id = $1",
-            movie_id
+            "SELECT scraped_at FROM movie_insights WHERE movie_id = $1",
+            movie_id,
         )
-    
-    # Allow refresh if never scraped or > 15 minutes ago
-    from datetime import timedelta
-    can_refresh = True
-    wait_time = 0
-    
-    if last_scraped:
+
+    # Short cooldown; bypass when the movie still has no eggs and no credits
+    cooldown = timedelta(minutes=1)
+    empty = _needs_insights(movie)
+    if last_scraped and not empty:
         time_since = datetime.now() - last_scraped
-        if time_since < timedelta(minutes=15):
-            can_refresh = False
-            wait_time = int((timedelta(minutes=15) - time_since).total_seconds() / 60)
-    
-    if not can_refresh:
-        return {
-            "status": "too_soon",
-            "message": f"Please wait {wait_time} more minute(s) before refreshing",
-            "last_analyzed": last_scraped.isoformat() if last_scraped else None,
-            "can_refresh_at": (last_scraped + timedelta(minutes=15)).isoformat() if last_scraped else None
-        }
-    
-    # Trigger re-analysis in background
-    from src.models import EnhancedMovie
-    
-    async def reanalyze_background():
-        try:
-            print(f"\n{'='*60}")
-            print(f"🔄 Re-analyzing: {movie['title']} (ID: {movie_id})")
-            print(f"{'='*60}")
-            
-            # Scrape fresh data
-            reddit_insights = await reddit_scraper.scrape_movie_insights(
-                movie['title'], movie.get('year'), movie.get('imdb_id')
-            )
-            
-            if reddit_insights:
-                print(f"✓ Fresh insights: {reddit_insights.reddit_discussion_count} discussions")
-                print(f"✓ Easter eggs: {len(reddit_insights.easter_eggs)}")
-                print(f"✓ Post-credits: {reddit_insights.post_credits.has_scene}")
-                
-                # Update movie with fresh insights
-                movie_obj = EnhancedMovie(
-                    id=movie['id'],
-                    title=movie['title'],
-                    year=movie['year'],
-                    release_date=movie.get('release_date'),
-                    runtime_minutes=movie.get('runtime_minutes', 0),
-                    poster_path=movie.get('poster_path'),
-                    overview=movie.get('overview', ''),
-                    vote_average=movie.get('vote_average', 0.0),
-                    popularity=movie.get('popularity', 0.0),
-                    imdb_id=movie.get('imdb_id'),
-                    tier=movie.get('tier', 'on-demand'),
-                    reddit_insights=reddit_insights
-                )
-                
-                await db.upsert_movie(movie_obj)
-                print("✓ Updated in database")
-                
-                # Export to MinIO if has content
-                has_content = (reddit_insights.post_credits.has_scene or 
-                              len(reddit_insights.easter_eggs) > 0)
-                
-                if has_content:
-                    print("📤 Exporting to MinIO...")
-                    from src.json_exporter import JSONExporter
-                    from src.storage_uploader import StorageUploader
-                    
-                    exporter = JSONExporter()
-                    uploader = StorageUploader()
-                    
-                    await exporter.initialize()
-                    try:
-                        tier = movie.get('tier', 'on-demand')
-                        filepath = await exporter.export_tier(tier)
-                        await uploader.upload_file(filepath)
-                        print("✓ Exported to MinIO")
-                    finally:
-                        await exporter.close()
-                
-                print(f"{'='*60}\n")
-            
-        except Exception as e:
-            print(f"❌ Error re-analyzing: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    asyncio.create_task(reanalyze_background())
-    
+        if time_since < cooldown:
+            wait_time = int((cooldown - time_since).total_seconds() / 60) + 1
+            return {
+                "status": "too_soon",
+                "message": f"Please wait {wait_time} more minute(s) before refreshing",
+                "last_analyzed": last_scraped.isoformat() if last_scraped else None,
+                "can_refresh_at": (last_scraped + cooldown).isoformat(),
+            }
+
+    movie_data = {
+        "id": movie["id"],
+        "title": movie["title"],
+        "year": movie.get("year"),
+        "release_date": movie.get("release_date"),
+        "runtime": movie.get("runtime_minutes", 0),
+        "poster_path": movie.get("poster_path"),
+        "overview": movie.get("overview", ""),
+        "vote_average": movie.get("vote_average", 0.0),
+        "popularity": movie.get("popularity", 0.0),
+        "imdb_id": movie.get("imdb_id"),
+    }
+    await db.enqueue_extract(
+        movie_id,
+        movie["title"],
+        movie.get("year"),
+        refresh=True,
+        requeue_if_done=True,
+    )
     return {
         "status": "processing",
-        "message": "Re-analyzing movie... Check back in 30-60 seconds",
-        "movie_id": movie_id
+        "message": "Fetching live writeups and extracting with Ollama... Check back shortly",
+        "movie_id": movie_id,
     }
 
 
 @app.post("/sync")
 async def trigger_sync():
-    """Manually trigger sync of database to MinIO"""
     try:
         await sync_job.sync_once()
         return {
             "status": "success",
             "message": "Sync completed successfully",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=telemetry.redact_text(f"Sync failed: {str(e)}"))  # tmdb-redact 2026-10-24
 
 
 @app.get("/stats")
 async def get_stats():
-    """Get statistics about the database"""
     async with db.pool.acquire() as conn:
         total_movies = await conn.fetchval("SELECT COUNT(*) FROM movies")
         movies_with_scenes = await conn.fetchval(
             "SELECT COUNT(*) FROM post_credits WHERE has_scene = TRUE"
         )
-        total_easter_eggs = await conn.fetchval(
-            "SELECT COUNT(*) FROM easter_eggs"
-        )
-
+        total_easter_eggs = await conn.fetchval("SELECT COUNT(*) FROM easter_eggs")
         by_tier = await conn.fetch(
             """
             SELECT tier, COUNT(*) as count
             FROM movies
             WHERE tier IS NOT NULL
             GROUP BY tier
-        """
+            """
         )
-
     return {
         "totalMovies": total_movies,
         "moviesWithPostCredits": movies_with_scenes,
@@ -460,5 +587,4 @@ async def get_stats():
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)

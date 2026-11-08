@@ -36,12 +36,16 @@ USER appuser
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision=$GIT_SHA \
+      org.opencontainers.image.source=https://github.com/hash167/movie-postcredits
+
 EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Start with gunicorn
-CMD ["gunicorn", "src.api:app", "-c", "gunicorn.conf.py"]
+# Live API process. Pass --build-arg GIT_SHA=$(git rev-parse HEAD).
+CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
 

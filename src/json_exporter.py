@@ -4,7 +4,7 @@ JSON exporter for movie and post-credits data by tier
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict
 from src.database import DatabaseManager
 from src.config import settings
@@ -43,13 +43,27 @@ class JSONExporter:
                 "confidence": movie.get("source_confidence", "medium"),
             }
 
-        # Parse easter_eggs if it's a JSON string
         easter_eggs = movie.get("easter_eggs", [])
         if isinstance(easter_eggs, str) and easter_eggs:
             try:
                 easter_eggs = json.loads(easter_eggs)
             except json.JSONDecodeError:
                 easter_eggs = []
+        mapped = []
+        if isinstance(easter_eggs, list):
+            for egg in easter_eggs:
+                if isinstance(egg, str) and egg.strip():
+                    mapped.append({"detail": egg.strip(), "significance": ""})
+                    continue
+                if not isinstance(egg, dict):
+                    continue
+                detail = (egg.get("detail") or egg.get("description") or egg.get("title") or "").strip()
+                if not detail:
+                    continue
+                mapped.append({
+                    "detail": detail,
+                    "significance": str(egg.get("significance") or "")[:50],
+                })
 
         return {
             "id": movie["id"],
@@ -63,8 +77,10 @@ class JSONExporter:
             "popularity": float(pop) if pop else None,
             "imdbId": movie.get("imdb_id"),
             "postCredits": post_credits,
-            "easterEggs": easter_eggs if isinstance(easter_eggs, list) else [],
-            "redditDiscussionCount": movie.get("reddit_discussion_count"),
+            "easterEggs": mapped,
+            "insightDiscussionCount": movie.get("discussion_count"),
+            "discussionCount": movie.get("discussion_count"),
+            "redditDiscussionCount": movie.get("discussion_count"),
         }
 
     async def export_tier(self, tier: str) -> str:
@@ -75,6 +91,31 @@ class JSONExporter:
         print(f"Exporting tier '{tier}' to {filepath}")
 
         movies = await self.db.get_movies_by_tier(tier)
+        # theaters tier must reflect current now_playing membership only.
+        # demote_stale_theater_movies handles this at scrape time; as a
+        # safety net, drop theaters rows not touched in the last 3 days
+        # (covers a missed demote without hiding a same-day scrape).
+        if tier == "theaters":
+            cutoff = datetime.now(timezone.utc) - timedelta(days=3)
+            before = len(movies)
+            filtered = []
+            for m in movies:
+                updated = m.get("updated_at")
+                if updated is None:
+                    filtered.append(m)
+                    continue
+                if getattr(updated, "tzinfo", None) is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+                else:
+                    updated = updated.astimezone(timezone.utc)
+                if updated >= cutoff:
+                    filtered.append(m)
+            movies = filtered
+            if before != len(movies):
+                print(
+                    f"Theaters export safety filter: {before} -> {len(movies)} "
+                    f"(dropped stale updated_at)"
+                )
 
         export_data = {
             "tier": tier,
@@ -185,8 +226,8 @@ class JSONExporter:
 
                 # Get easter eggs for this movie
                 query = (
-                    "SELECT detail, significance, confidence, "
-                    "source_url FROM easter_eggs WHERE movie_id = $1"
+                    "SELECT COALESCE(description, title) AS detail, "
+                    "significance FROM easter_eggs WHERE movie_id = $1"
                 )
                 eggs = await conn.fetch(query, movie_dict["id"])
 

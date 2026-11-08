@@ -134,6 +134,15 @@
       background: white;
       border-radius: 8px;
       border-left: 4px solid #667eea;
+      overflow: visible;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    li strong, li span, li div {
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     
     small {
@@ -150,21 +159,19 @@
   </div>
   
   <!-- React and ReactDOM from CDN -->
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="./react.production.min.js"></script>
+  <script src="./react-dom.production.min.js"></script>
   
   <!-- Babel Standalone for JSX transformation -->
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  
   <!-- Load config from external file -->
   <script src="./config.js"></script>
   
   <!-- Load application files -->
-  <script type="text/babel" src="./useMovieSearch.js"></script>
-  <script type="text/babel" src="./MovieSearchComponent.js"></script>
+  <script src="./useMovieSearch.js"></script>
+  <script src="./MovieSearchComponent.js"></script>
   
   <!-- Render the app -->
-  <script type="text/babel">
+  <script>
     // Ensure config is loaded before rendering
     if (!window.CDN_BASE || !window.API_BASE) {
       console.error('Config not loaded! Make sure config.js exists.');
@@ -172,7 +179,7 @@
     }
     
     const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<MovieSearchComponent />);
+    root.render(React.createElement(window.MovieSearchComponent));
   </script>
 </body>
 </html>

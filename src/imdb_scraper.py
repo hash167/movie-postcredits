@@ -13,7 +13,14 @@ class IMDbScraper:
     def __init__(self):
         self.base_url = "https://www.imdb.com"
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/128.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.imdb.com/",
         }
 
     async def get_trivia_and_goofs(self, imdb_id: str) -> dict:
@@ -47,7 +54,11 @@ class IMDbScraper:
                 response = await client.get(url, headers=self.headers, follow_redirects=True)
                 
                 if response.status_code != 200:
-                    print(f"  ⚠️  IMDb trivia request failed: {response.status_code}")
+                    # 202 = IMDb/Akamai bot challenge (empty interstitial), not a real trivia page
+                    print(
+                        f"  ⚠️  IMDb trivia blocked ({response.status_code}); "
+                        "WAF challenge, not a missing page"
+                    )
                     return []
 
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -79,7 +90,10 @@ class IMDbScraper:
                 response = await client.get(url, headers=self.headers, follow_redirects=True)
                 
                 if response.status_code != 200:
-                    print(f"  ⚠️  IMDb goofs request failed: {response.status_code}")
+                    print(
+                        f"  ⚠️  IMDb goofs blocked ({response.status_code}); "
+                        "WAF challenge, not a missing page"
+                    )
                     return []
 
                 soup = BeautifulSoup(response.text, 'html.parser')
