@@ -106,12 +106,25 @@ _SENSITIVE_NAME_RE = _re.compile(
     _re.IGNORECASE,
 )
 
-# key=value pairs inside free text (URLs in exception messages, log lines ...).
-_KV_RE = _re.compile(
+# Credential assignments in free text: URLs, exception messages, log lines,
+# and dict/JSON fragments. The value may be bare, single-quoted, or
+# double-quoted. The separator is "=", ":", or the %3D/%3A encodings.
+_KV_KEY_RE = (
     r"(?P<k>\b(?:[A-Za-z0-9]+[_\-.])*(?:api[_\-]?key|apikey|key|token|access[_\-]?token|"
     r"refresh[_\-]?token|id[_\-]?token|password|passwd|pwd|secret|client[_\-]?secret|"
     r"signature|sig|session|sessionid|credentials?|private[_\-]?key))"
-    r"(?P<sep>=|%3D)(?P<v>[^&\s'\"<>#,;)\]}]+)",
+)
+_KV_RE = _re.compile(
+    _KV_KEY_RE
+    + r"(?P<kq>['\"])?"
+    + r"(?P<sep>\s*(?:%3D|%3A|=|:)\s*)"
+    + r"(?:"
+    + r"(?P<q>['\"])(?P<qv>[^'\"]*)(?P=q)"
+    + r"|"
+    + r"(?P<oq>['\"])(?P<ov>[^&\s'\"<>#,;)\]}]*)"
+    + r"|"
+    + r"(?P<uv>[^&\s'\"<>#,;)\]}]+)"
+    + r")",
     _re.IGNORECASE,
 )
 _AUTH_HDR_RE = _re.compile(r"(?P<p>\b(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/=\-]{8,}", _re.IGNORECASE)
@@ -128,11 +141,25 @@ def _sensitive_name(name: str) -> bool:
     return bool(name) and bool(_SENSITIVE_NAME_RE.search(name))
 
 
+def _mask_kv(match):
+    """Replace the value of one credential assignment and keep its shape."""
+    key = match.group("k")
+    key_quote = match.group("kq") or ""
+    sep = match.group("sep")
+    quote = match.group("q") or match.group("oq") or ""
+    close = quote if match.group("q") else ""
+    return f"{key}{key_quote}{sep}{quote}{REDACTED}{close}"
+
+
 def redact_text(value):
-    """Mask key/token/password/secret values in arbitrary text."""
+    """Mask key/token/password/secret values in arbitrary text.
+
+    Covers bare ``key=value``, percent-encoded separators, optional quotes,
+    and colon-style dict/JSON pairs such as ``"api_key": "value"``.
+    """
     if not isinstance(value, str) or not value:
         return value
-    out = _KV_RE.sub(lambda m: m.group("k") + m.group("sep") + REDACTED, value)
+    out = _KV_RE.sub(_mask_kv, value)
     out = _AUTH_HDR_RE.sub(lambda m: m.group("p") + REDACTED, out)
     out = _USERINFO_RE.sub(lambda m: m.group("s") + REDACTED + "@", out)
     return out
@@ -193,57 +220,224 @@ def redact_attributes(attrs):
     return out if changed else None
 
 
+def _load_span_types():
+    """Import span constructors next to their use.
+
+    ``Status`` lives in ``opentelemetry.trace``. The sanitizer imports it
+    here so a status rebuild does not depend on a name bound only at module
+    import time. If rebuilding still fails, the exporter scrubs or drops the
+    span instead of shipping the original.
+    """
+    from opentelemetry.sdk.trace import Event, ReadableSpan
+    from opentelemetry.trace import Status, StatusCode
+
+    return Event, ReadableSpan, Status, StatusCode
+
+
+def _redact_status(status, status_cls):
+    """Return ``(status, changed)``. Description text is masked when present."""
+    desc = getattr(status, "description", None) if status is not None else None
+    if not isinstance(desc, str) or not desc:
+        return status, False
+    new_desc = redact_text(desc)
+    if new_desc == desc:
+        return status, False
+    return status_cls(status.status_code, new_desc), True
+
+
+def _redact_events(events, event_cls):
+    """Return ``(events, changed)`` with secret text removed from each event."""
+    if not events:
+        return (), False
+    changed = False
+    out = []
+    for ev in events:
+        name = getattr(ev, "name", "")
+        new_name = redact_text(name) if isinstance(name, str) else name
+        ev_attrs = redact_attributes(getattr(ev, "attributes", None))
+        if ev_attrs is not None or new_name != name:
+            changed = True
+            out.append(
+                event_cls(
+                    new_name,
+                    ev_attrs if ev_attrs is not None else ev.attributes,
+                    getattr(ev, "timestamp", None),
+                )
+            )
+        else:
+            out.append(ev)
+    return out, changed
+
+
+def _assemble_span(span, attrs, events, status, readable_cls, drop_links=False):
+    """Build a new readable span. Never returns ``span`` itself."""
+    name = getattr(span, "name", "") or ""
+    if isinstance(name, str):
+        name = redact_text(name)
+    scope = getattr(span, "instrumentation_scope", None)
+    if scope is None:
+        scope = getattr(span, "instrumentation_info", None)
+    return readable_cls(
+        name=name,
+        context=getattr(span, "context", None),
+        parent=getattr(span, "parent", None),
+        resource=getattr(span, "resource", None),
+        attributes=attrs if attrs is not None else {},
+        events=events,
+        links=() if drop_links else getattr(span, "links", ()) or (),
+        kind=getattr(span, "kind", None),
+        status=status,
+        start_time=getattr(span, "start_time", None),
+        end_time=getattr(span, "end_time", None),
+        instrumentation_scope=scope,
+    )
+
+
+def _scrub_attributes(attrs):
+    """Best-effort attribute mask. A value that cannot be masked is dropped."""
+    if not attrs:
+        return {}
+    out = {}
+    try:
+        items = list(dict(attrs).items())
+    except Exception:
+        return {}
+    for key, val in items:
+        try:
+            if isinstance(val, str):
+                if key in _URLISH_ATTRS:
+                    out[key] = redact_url(val)
+                elif _sensitive_name(str(key).rsplit(".", 1)[-1]):
+                    out[key] = REDACTED
+                else:
+                    out[key] = redact_text(val)
+            elif isinstance(val, (list, tuple)) and val and all(isinstance(v, str) for v in val):
+                out[key] = tuple(redact_text(v) for v in val)
+            else:
+                out[key] = val
+        except Exception:
+            continue
+    return out
+
+
+def _scrub_events(events, event_cls):
+    if not events:
+        return ()
+    out = []
+    try:
+        items = list(events)
+    except Exception:
+        return ()
+    for ev in items:
+        try:
+            name = getattr(ev, "name", "")
+            new_name = redact_text(name) if isinstance(name, str) else "event"
+            try:
+                ev_attrs = redact_attributes(getattr(ev, "attributes", None))
+            except Exception:
+                ev_attrs = {}
+            if ev_attrs is None:
+                ev_attrs = _scrub_attributes(getattr(ev, "attributes", None))
+            out.append(event_cls(new_name, ev_attrs, getattr(ev, "timestamp", None)))
+        except Exception:
+            continue
+    return tuple(out)
+
+
+def _scrub_status(status, status_cls, unset_code):
+    code = unset_code
+    desc = None
+    try:
+        if status is not None:
+            code = status.status_code
+            desc = status.description
+    except Exception:
+        desc = None
+    new_desc = None
+    if isinstance(desc, str) and desc:
+        try:
+            new_desc = redact_text(desc)
+        except Exception:
+            new_desc = None
+    try:
+        if new_desc:
+            return status_cls(code, new_desc)
+        return status_cls(code)
+    except Exception:
+        try:
+            return status_cls(unset_code)
+        except Exception:
+            return None
+
+
 class RedactingSpanExporter:
     """Wraps a SpanExporter; masks secrets in attributes, events and status."""
 
     def __init__(self, inner):
         self._inner = inner
 
-    def _clean(self, span):
-        try:
-            from opentelemetry.sdk.trace import Event, ReadableSpan
+    def _sanitize(self, span):
+        event_cls, readable_cls, status_cls, _unset = _load_span_types()
+        attrs = redact_attributes(span.attributes)
+        events, ev_changed = _redact_events(span.events, event_cls)
+        status, status_changed = _redact_status(span.status, status_cls)
+        name = getattr(span, "name", "") or ""
+        name_changed = isinstance(name, str) and redact_text(name) != name
+        if attrs is None and not ev_changed and not status_changed and not name_changed:
+            return span
+        return _assemble_span(
+            span,
+            attrs if attrs is not None else span.attributes,
+            events,
+            status,
+            readable_cls,
+        )
 
-            attrs = redact_attributes(span.attributes)
-            events = list(span.events or ())
-            new_events = []
-            ev_changed = False
-            for ev in events:
-                ev_attrs = redact_attributes(ev.attributes)
-                if ev_attrs is not None:
-                    ev_changed = True
-                    new_events.append(Event(ev.name, ev_attrs, ev.timestamp))
-                else:
-                    new_events.append(ev)
-            status = span.status
-            desc = getattr(status, "description", None)
-            new_desc = redact_text(desc) if desc else desc
-            if attrs is None and not ev_changed and new_desc == desc:
-                return span
-            if new_desc != desc:
-                status = Status(status.status_code, new_desc)
-            return ReadableSpan(
-                name=span.name,
-                context=span.context,
-                parent=span.parent,
-                resource=span.resource,
-                attributes=attrs if attrs is not None else span.attributes,
-                events=new_events,
-                links=span.links,
-                kind=span.kind,
-                status=status,
-                start_time=span.start_time,
-                end_time=span.end_time,
-                instrumentation_scope=getattr(span, "instrumentation_scope", None),
+    def _scrub(self, span):
+        """Rebuild a safe span after sanitization failed. Never the original."""
+        try:
+            event_cls, readable_cls, status_cls, unset_code = _load_span_types()
+        except Exception:
+            return None
+        try:
+            attrs = _scrub_attributes(getattr(span, "attributes", None))
+        except Exception:
+            attrs = {}
+        try:
+            events = _scrub_events(getattr(span, "events", None), event_cls)
+        except Exception:
+            events = ()
+        status = _scrub_status(getattr(span, "status", None), status_cls, unset_code)
+        if status is None:
+            return None
+        try:
+            built = _assemble_span(
+                span, attrs, events, status, readable_cls, drop_links=True
             )
         except Exception:
-            # Never ship a span we failed to sanitize if it looks sensitive.
-            try:
-                blob = repr(dict(span.attributes or {}))
-                if redact_text(blob) != blob:
-                    return None
-            except Exception:
-                return None
+            return None
+        if built is span:
+            return None
+        return built
+
+    def _clean(self, span):
+        try:
+            cleaned = self._sanitize(span)
+        except Exception:
+            cleaned = None
+        if cleaned is not None and cleaned is not span:
+            return cleaned
+        if cleaned is span:
             return span
+        # Sanitization failed. Rebuild a fully masked span, or drop it.
+        # The original object is never exported.
+        try:
+            scrubbed = self._scrub(span)
+        except Exception:
+            return None
+        if scrubbed is None or scrubbed is span:
+            return None
+        return scrubbed
 
     def export(self, spans):
         cleaned = [c for c in (self._clean(s) for s in spans) if c is not None]
