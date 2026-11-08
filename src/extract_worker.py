@@ -23,7 +23,7 @@ from src.database import DatabaseManager
 from src.jobs import fill_insights
 from src.movie_insights import MovieInsights
 from src.tmdb_client import TMDBClient
-from src.telemetry import record_extract_job, start_span
+from src.telemetry import record_extract_job, redact_text, start_span
 
 
 WORKER_ID = os.environ.get("HOSTNAME") or socket.gethostname()
@@ -112,7 +112,7 @@ async def main():
                 await db.mark_job_error(
                     job["id"],
                     job["attempts"],
-                    f"{type(e).__name__}: {e}",
+                    redact_text(f"{type(e).__name__}: {e}"),  # tmdb-redact 2026-10-24
                 )
     finally:
         await db.close()

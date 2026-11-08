@@ -16,6 +16,7 @@ from src.database import DatabaseManager
 from src.tmdb_client import TMDBClient
 from src.movie_insights import MovieInsights
 from src.sync_job import sync_job
+from src.telemetry import redact_text  # tmdb-redact 2026-10-24: also installs stdout/log masking
 
 
 def _parse_easter_eggs(easter_eggs):
@@ -538,7 +539,7 @@ async def trigger_sync():
             "timestamp": datetime.now().isoformat(),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=redact_text(f"Sync failed: {str(e)}"))  # tmdb-redact 2026-10-24
 
 
 @app.get("/stats")

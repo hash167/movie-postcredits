@@ -141,16 +141,23 @@ def _brave_hrefs(html: str) -> List[str]:
 class MovieInsights:
     def __init__(self):
         self.tmdb_key = os.getenv("TMDB_API_KEY", "")
+        self.tmdb_read_token = os.getenv("TMDB_READ_ACCESS_TOKEN", "").strip()  # tmdb-redact 2026-10-24
         self.tmdb_base = "https://api.themoviedb.org/3"
         self.ollama_host = os.getenv("OLLAMA_HOST", "http://100.67.63.33:11434").rstrip("/")
         self.ollama_model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 
+    def _tmdb_auth(self) -> Dict:
+        """Bearer header when a v4 read token is configured, else v3 api_key param."""
+        if self.tmdb_read_token:
+            return {"headers": {"Authorization": f"Bearer {self.tmdb_read_token}"}}
+        return {"params": {"api_key": self.tmdb_key}}
+
     async def keywords_for_movie(self, movie_id: int) -> List[Dict]:
-        if not movie_id or not self.tmdb_key:
+        if not movie_id or not (self.tmdb_key or self.tmdb_read_token):
             return []
         url = f"{self.tmdb_base}/movie/{movie_id}/keywords"
         async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.get(url, params={"api_key": self.tmdb_key})
+            r = await client.get(url, **self._tmdb_auth())
             r.raise_for_status()
             return r.json().get("keywords") or []
 
@@ -374,11 +381,11 @@ class MovieInsights:
             raise OllamaExtractError(f"{type(e).__name__}: {e}") from e
 
     async def credits_for_movie(self, movie_id: int) -> List[Dict]:
-        if not movie_id or not self.tmdb_key:
+        if not movie_id or not (self.tmdb_key or self.tmdb_read_token):
             return []
         url = f"{self.tmdb_base}/movie/{movie_id}/credits"
         async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.get(url, params={"api_key": self.tmdb_key})
+            r = await client.get(url, **self._tmdb_auth())
             r.raise_for_status()
             return list((r.json() or {}).get("cast") or [])
 
