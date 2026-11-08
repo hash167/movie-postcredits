@@ -8,8 +8,8 @@
 kubernetes/all-in-one.yaml
 kubernetes/cronjobs.yaml
 
-# Frontend config (has IPs)
-frontend/config.js
+# Do not commit a local override of the same-origin frontend config.
+# frontend/config.js in git is the published same-origin template.
 
 # Python
 __pycache__/

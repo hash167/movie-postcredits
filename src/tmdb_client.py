@@ -1,3 +1,5 @@
+import os
+
 import httpx
 from typing import List, Dict, Optional
 from src.config import settings
@@ -7,7 +9,21 @@ class TMDBClient:
     def __init__(self):
         self.base_url = "https://api.themoviedb.org/3"
         self.api_key = settings.tmdb_api_key
+        self.read_token = os.getenv("TMDB_READ_ACCESS_TOKEN", "").strip()
         self.image_base = "https://image.tmdb.org/t/p/w500"
+
+    def _auth(self, params: Dict) -> Dict:
+        """httpx kwargs for TMDB auth (tmdb-redact 2026-10-24).
+
+        Prefers a v4 read access token (TMDB_READ_ACCESS_TOKEN) sent as an
+        Authorization header so no credential appears in URLs; otherwise falls
+        back to the v3 ?api_key= param (masked from telemetry by src.telemetry).
+        """
+        params = dict(params)
+        if self.read_token:
+            params.pop("api_key", None)
+            return {"params": params, "headers": {"Authorization": f"Bearer {self.read_token}"}}
+        return {"params": params}
 
     async def get_movies_in_theaters(self, limit: int = 50) -> List[Dict]:
         movies = []
@@ -19,7 +35,7 @@ class TMDBClient:
                 "region": "US",
                 "page": 1,
             }
-            response = await client.get(url, params=params)
+            response = await client.get(url, **self._auth(params))
             response.raise_for_status()
             data = response.json()
             movies.extend(data["results"])
@@ -35,7 +51,7 @@ class TMDBClient:
                     "language": "en-US",
                     "page": page
                 }
-                response = await client.get(url, params=params)
+                response = await client.get(url, **self._auth(params))
                 response.raise_for_status()
                 data = response.json()
                 movies.extend(data["results"])
@@ -60,7 +76,7 @@ class TMDBClient:
                         "sort_by": "popularity.desc",
                         "page": page,
                     }
-                    response = await client.get(url, params=params)
+                    response = await client.get(url, **self._auth(params))
                     response.raise_for_status()
                     data = response.json()
                     if not data["results"]:
@@ -76,16 +92,54 @@ class TMDBClient:
         if year:
             params["year"] = year
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params)
+            response = await client.get(url, **self._auth(params))
             response.raise_for_status()
             data = response.json()
             return data["results"][0] if data.get("results") else None
 
+    async def search_movies(
+        self, query: str, year: Optional[int] = None
+    ) -> List[Dict]:
+        """Return up to 20 TMDB /search/movie hits. Does not mutate state."""
+        url = f"{self.base_url}/search/movie"
+        params = {"api_key": self.api_key, "query": query, "language": "en-US"}
+        if year:
+            params["year"] = year
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(url, **self._auth(params))
+            response.raise_for_status()
+            data = response.json()
+        results = []
+        for item in (data.get("results") or [])[:20]:
+            release_date = item.get("release_date") or ""
+            year_val = None
+            if len(release_date) >= 4:
+                try:
+                    year_val = int(release_date[:4])
+                except ValueError:
+                    year_val = None
+            poster_path = None
+            if item.get("poster_path"):
+                poster_path = f"{self.image_base}{item['poster_path']}"
+            results.append({
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "year": year_val,
+                "poster_path": poster_path,
+                "overview": item.get("overview") or "",
+                "popularity": item.get("popularity", 0.0),
+            })
+        return results
+
     async def get_movie_details(self, movie_id: int) -> Optional[Dict]:
         url = f"{self.base_url}/movie/{movie_id}"
-        params = {"api_key": self.api_key, "language": "en-US"}
+        params = {
+            "api_key": self.api_key,
+            "language": "en-US",
+            "append_to_response": "keywords",
+        }
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params)
+            response = await client.get(url, **self._auth(params))
             response.raise_for_status()
             return response.json()
 

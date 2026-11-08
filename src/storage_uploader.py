@@ -33,7 +33,11 @@ class StorageUploader:
         )
 
         # Check if bucket exists and create if needed
-        self._ensure_bucket_exists()
+        try:
+            self._ensure_bucket_exists()
+        except Exception as e:
+            print(f"MinIO unavailable, continuing without object storage: {e}")
+            self.s3_client = None
 
     def _ensure_bucket_exists(self):
         """Ensure the bucket exists, create if it doesn't"""
@@ -82,6 +86,10 @@ class StorageUploader:
         self, local_path: str, remote_path: Optional[str] = None
     ) -> bool:
         """Upload a file to S3-compatible storage"""
+
+        if self.s3_client is None:
+            print("MinIO unavailable, skip upload")
+            return False
 
         if not os.path.exists(local_path):
             print(f"File not found: {local_path}")
@@ -214,7 +222,6 @@ class StorageUploader:
             base_url = self.s3_public_url.rstrip("/")
             return f"{base_url}/{remote_path}"
 
-        # Default: endpoint/bucket/key format (works with MinIO)
-        # Format: http://localhost:9000/{bucket}/{key}
+        # Default: {S3_ENDPOINT}/{bucket}/{key} (MinIO path-style).
         endpoint = self.s3_endpoint.rstrip("/")
         return f"{endpoint}/{self.s3_bucket}/{remote_path}"

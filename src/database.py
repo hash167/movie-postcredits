@@ -15,6 +15,103 @@ class DatabaseManager:
             min_size=2,
             max_size=10,
         )
+        await self.ensure_schema()
+
+    async def ensure_schema(self):
+        """Create tables the image expects if a fresh/partial DB is missing them."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS batch_logs (
+                    id SERIAL PRIMARY KEY,
+                    tier VARCHAR(50),
+                    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    movies_processed INTEGER DEFAULT 0,
+                    movies_failed INTEGER DEFAULT 0,
+                    status VARCHAR(50) DEFAULT 'running'
+                )
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS extract_jobs (
+                    id SERIAL PRIMARY KEY,
+                    movie_id INT NOT NULL UNIQUE,
+                    title TEXT,
+                    year INT,
+                    status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                    attempts INT DEFAULT 0,
+                    last_error TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    started_at TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    locked_at TIMESTAMP
+                )
+                """
+            )
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS extract_jobs_status_created_idx
+                ON extract_jobs (status, created_at)
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS movie_insights (
+                    id SERIAL PRIMARY KEY,
+                    movie_id INTEGER NOT NULL UNIQUE REFERENCES movies(id) ON DELETE CASCADE,
+                    discussion_count INTEGER DEFAULT 0,
+                    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_movie_insights_movie_id
+                ON movie_insights (movie_id)
+                """
+            )
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(872314)")
+                await conn.execute("DROP VIEW IF EXISTS movies_complete")
+                await conn.execute(
+                    "ALTER TABLE easter_eggs ALTER COLUMN significance TYPE TEXT"
+                )
+                await conn.execute(
+                """
+                CREATE VIEW movies_complete AS
+                SELECT m.id,
+                    m.title,
+                    m.year,
+                    m.release_date,
+                    m.runtime_minutes,
+                    m.poster_path,
+                    m.overview,
+                    m.vote_average,
+                    m.popularity,
+                    m.tier,
+                    m.imdb_id,
+                    m.updated_at,
+                    pc.has_scene,
+                    pc.scene_count,
+                    pc.mid_credits,
+                    pc.post_credits AS post_credits_desc,
+                    pc.worth_staying,
+                    pc.spoiler_free_hint,
+                    pc.source_confidence,
+                    ri.discussion_count,
+                    ri.scraped_at AS reddit_scraped_at,
+                    ( SELECT json_agg(json_build_object(
+                          'detail', COALESCE(ee.description, ee.title::text),
+                          'significance', ee.significance)) AS json_agg
+                       FROM easter_eggs ee
+                      WHERE ee.movie_id = m.id) AS easter_eggs
+                FROM movies m
+                LEFT JOIN post_credits pc ON m.id = pc.movie_id
+                LEFT JOIN movie_insights ri ON m.id = ri.movie_id
+                """
+            )
 
     async def close(self):
         if self.pool:
@@ -53,8 +150,8 @@ class DatabaseManager:
                     movie.imdb_id,
                     datetime.now(),
                 )
-                if movie.reddit_insights:
-                    pc = movie.reddit_insights.post_credits
+                if movie.movie_insights:
+                    pc = movie.movie_insights.post_credits
                     mid_cred = (
                         pc.descriptions[0] if len(pc.descriptions) > 0
                         else None
@@ -84,44 +181,42 @@ class DatabaseManager:
                         pc.scene_count,
                         mid_cred,
                         post_cred,
-                        pc.worth_staying,
+                        None if pc.worth_staying is None else ("yes" if pc.worth_staying else "no"),
                         pc.spoiler_free_hint,
                         "medium",
                     )
-                    # Remove old easter eggs
-                    await conn.execute(
-                        "DELETE FROM easter_eggs WHERE movie_id=$1", movie.id
-                    )
-                    for egg in movie.reddit_insights.easter_eggs:
+                    # Only replace eggs when the new scrape found some
+                    if movie.movie_insights.easter_eggs:
+                        await conn.execute(
+                            "DELETE FROM easter_eggs WHERE movie_id=$1", movie.id
+                        )
+                    for egg in movie.movie_insights.easter_eggs:
+                        title = (egg.detail or "")[:200] or "Easter egg"
+                        significance = egg.significance or ""
                         await conn.execute(
                             """
                             INSERT INTO easter_eggs (
-                                movie_id, detail, significance,
-                                confidence, source_url
-                            ) VALUES ($1, $2, $3, $4, $5)
+                                movie_id, title, description, significance
+                            ) VALUES ($1, $2, $3, $4)
                             """,
                             movie.id,
+                            title,
                             egg.detail,
-                            egg.significance,
-                            egg.confidence,
-                            egg.source_url,
+                            significance,
                         )
-                    disc_count = movie.reddit_insights.reddit_discussion_count
+                    disc_count = movie.movie_insights.discussion_count
                     await conn.execute(
                         """
-                        INSERT INTO reddit_insights (
-                            movie_id, discussion_count, source_urls,
-                            scraped_at
+                        INSERT INTO movie_insights (
+                            movie_id, discussion_count, scraped_at
                         )
-                        VALUES ($1, $2, $3, $4)
+                        VALUES ($1, $2, $3)
                         ON CONFLICT (movie_id) DO UPDATE SET
                             discussion_count=EXCLUDED.discussion_count,
-                            source_urls=EXCLUDED.source_urls,
                             scraped_at=EXCLUDED.scraped_at
                         """,
                         movie.id,
                         disc_count,
-                        movie.reddit_insights.source_urls,
                         datetime.now(),
                     )
 
@@ -134,12 +229,50 @@ class DatabaseManager:
             )
             return [dict(row) for row in rows]
 
+    async def demote_stale_theater_movies(
+        self, keep_ids: List[int], fallback_tier: str = "recent"
+    ) -> int:
+        """Move theaters-tier rows not in keep_ids off the theaters list.
+
+        theaters-daily upserts current now_playing titles but historically never
+        cleared old tier='theaters' rows, so the export grew forever. Demote
+        anything no longer in today's TMDB now_playing set so export/UI only
+        show currently-in-theaters titles. Row data is kept for search.
+        """
+        ids = [int(x) for x in (keep_ids or []) if x is not None]
+        if not ids:
+            # A failed or empty now_playing fetch must not clear the theaters tier.
+            print("Skipping theater demotion: now_playing id list is empty")
+            return 0
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE movies
+                SET tier = $1, updated_at = $2
+                WHERE tier = 'theaters' AND NOT (id = ANY($3::int[]))
+                """,
+                fallback_tier,
+                datetime.now(),
+                ids,
+            )
+        try:
+            return int(result.split()[-1])
+        except (AttributeError, ValueError, IndexError):
+            return 0
+
     async def get_movie_by_id(self, movie_id: int) -> Optional[Dict]:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM movies_complete WHERE id=$1", movie_id
             )
             return dict(row) if row else None
+
+    async def get_extract_job_status(self, movie_id: int) -> Optional[str]:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT status FROM extract_jobs WHERE movie_id=$1",
+                movie_id,
+            )
 
     async def log_batch_start(self, tier: str) -> int:
         async with self.pool.acquire() as conn:
@@ -164,3 +297,134 @@ class DatabaseManager:
                 failed,
                 batch_id,
             )
+
+    async def enqueue_extract(
+        self,
+        movie_id: int,
+        title: str,
+        year: Optional[int] = None,
+        refresh: bool = False,
+        requeue_if_done: bool = False,
+    ):
+        """Insert a queued job, or re-queue failed/done-when-allowed rows.
+
+        Existing queued/running rows are left alone (idempotent).
+        A done row is re-queued only on explicit refresh or when the
+        caller says the movie still needs insights.
+        """
+        requeue_done = bool(refresh or requeue_if_done)
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO extract_jobs (movie_id, title, year, status)
+                VALUES ($1, $2, $3, 'queued')
+                ON CONFLICT (movie_id) DO UPDATE SET
+                    status = 'queued',
+                    title = EXCLUDED.title,
+                    year = EXCLUDED.year,
+                    finished_at = NULL
+                WHERE extract_jobs.status = 'failed'
+                   OR (extract_jobs.status = 'done' AND $4::boolean)
+                """,
+                movie_id,
+                title,
+                year,
+                requeue_done,
+            )
+
+    async def reclaim_stale_jobs(self) -> Dict:
+        async with self.pool.acquire() as conn:
+            requeued = await conn.execute(
+                """
+                UPDATE extract_jobs
+                SET status = 'queued', started_at = NULL, locked_at = NULL
+                WHERE status = 'running'
+                  AND started_at < NOW() - INTERVAL '10 minutes'
+                  AND attempts < 3
+                """
+            )
+            failed = await conn.execute(
+                """
+                UPDATE extract_jobs
+                SET status = 'failed',
+                    finished_at = NOW(),
+                    last_error = 'stale running timeout after 3 attempts'
+                WHERE status = 'running'
+                  AND started_at < NOW() - INTERVAL '10 minutes'
+                  AND attempts >= 3
+                """
+            )
+        def _count(status: str) -> int:
+            try:
+                return int(status.split()[-1])
+            except (AttributeError, ValueError, IndexError):
+                return 0
+        return {"requeued": _count(requeued), "failed": _count(failed)}
+
+    async def claim_next_job(self) -> Optional[Dict]:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, movie_id, title, year
+                    FROM extract_jobs
+                    WHERE status = 'queued'
+                    ORDER BY created_at
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                    """
+                )
+                if not row:
+                    return None
+                updated = await conn.fetchrow(
+                    """
+                    UPDATE extract_jobs
+                    SET status = 'running',
+                        started_at = NOW(),
+                        locked_at = NOW(),
+                        attempts = attempts + 1
+                    WHERE id = $1
+                    RETURNING id, movie_id, title, year, attempts
+                    """,
+                    row["id"],
+                )
+                return dict(updated) if updated else None
+
+    async def mark_job_done(self, job_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE extract_jobs
+                SET status = 'done', finished_at = NOW()
+                WHERE id = $1
+                """,
+                job_id,
+            )
+
+    async def mark_job_error(self, job_id: int, attempts: int, error: str):
+        err = (error or "")[:500]
+        async with self.pool.acquire() as conn:
+            if attempts >= 3:
+                await conn.execute(
+                    """
+                    UPDATE extract_jobs
+                    SET status = 'failed', finished_at = NOW(), last_error = $2
+                    WHERE id = $1
+                    """,
+                    job_id,
+                    err,
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE extract_jobs
+                    SET status = 'queued',
+                        last_error = $2,
+                        started_at = NULL,
+                        locked_at = NULL
+                    WHERE id = $1
+                    """,
+                    job_id,
+                    err,
+                )
+
