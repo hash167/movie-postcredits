@@ -1,8 +1,10 @@
 """TMDB keywords + live web articles + Ollama extract. No Reddit/IMDb."""
 
+import ipaddress
 import json
 import os
 import re
+import socket
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
@@ -102,15 +104,57 @@ def _brave_unwrap(href: str) -> str:
     return href
 
 
+def _public_ip(ip: ipaddress._BaseAddress) -> bool:
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _resolved_addrs(host: str):
+    try:
+        return [ipaddress.ip_address(host)]
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return []
+    addrs = []
+    for info in infos:
+        raw = info[4][0].split("%", 1)[0]
+        try:
+            addrs.append(ipaddress.ip_address(raw))
+        except ValueError:
+            return []
+    return addrs
+
+
+def _is_public_http_url(url: str) -> bool:
+    """True only for http(s) URLs whose host resolves to public addresses."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    addrs = _resolved_addrs(host)
+    return bool(addrs) and all(_public_ip(ip) for ip in addrs)
+
+
 def _usable_url(href: str) -> str:
     url = _brave_unwrap(_ddg_unwrap(href))
     if not url:
         return ""
     if url.startswith("//"):
         url = "https:" + url
-    if not url.startswith("http"):
+    if not _is_public_http_url(url):
         return ""
-    host = urlparse(url).netloc.lower().lstrip("www.")
+    host = (urlparse(url).hostname or "").lower().lstrip("www.")
     if not host or host in SKIP_HOSTS:
         return ""
     if any(host == s or host.endswith("." + s) for s in SKIP_HOSTS):
@@ -260,19 +304,38 @@ class MovieInsights:
             print(f"  search url: {u}", flush=True)
         return urls[:5]
 
+    async def _get_public(self, client, url: str, hops: int = 3):
+        """GET an http(s) URL and refuse private, link-local, or bad redirects."""
+        current = url
+        for _ in range(hops + 1):
+            if not _is_public_http_url(current):
+                return None
+            response = await client.get(current)
+            if response.status_code in (301, 302, 303, 307, 308):
+                location = response.headers.get("location")
+                if not location:
+                    return None
+                current = urljoin(str(response.url), location)
+                continue
+            return response
+        return None
+
     async def fetch_articles(self, urls: List[str]) -> List[Tuple[str, str]]:
         articles = []
         headers = {"User-Agent": UA, "Accept": "text/html"}
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=headers) as client:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False, headers=headers) as client:
             for url in urls:
                 try:
-                    r = await client.get(url)
-                    if r.status_code != 200 or "text/html" not in (r.headers.get("content-type") or ""):
+                    r = await self._get_public(client, url)
+                    if r is None or r.status_code != 200 or "text/html" not in (r.headers.get("content-type") or ""):
+                        continue
+                    final_url = str(r.url)
+                    if not _is_public_http_url(final_url):
                         continue
                     text = _strip_html(r.text)
                     if len(text) < 400:
                         continue
-                    articles.append((url, text[:3000]))
+                    articles.append((final_url, text[:3000]))
                 except Exception as e:
                     print(f"  ⚠️  fetch {url}: {e}")
                 if sum(len(t) for _, t in articles) > 8000:

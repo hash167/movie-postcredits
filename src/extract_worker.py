@@ -97,7 +97,7 @@ async def main():
                     },
                 ):
                     await run_claimed_job(db, tmdb, extractor, job)
-                    await db.mark_job_done(job["id"])
+                    await db.mark_job_done(job["id"], job["attempts"])
                 record_extract_job("done", (asyncio.get_event_loop().time() - t0) * 1000)
                 print(
                     f"job done id={job['id']} movie_id={job['movie_id']} "

@@ -189,15 +189,15 @@ class DatabaseManager:
                         pc.scene_count,
                         mid_cred,
                         post_cred,
-                        None if pc.worth_staying is None else ("yes" if pc.worth_staying else "no"),
+                        pc.worth_staying,
                         pc.spoiler_free_hint,
                         "medium",
                     )
-                    # Only replace eggs when the new scrape found some
-                    if movie.movie_insights.easter_eggs:
-                        await conn.execute(
-                            "DELETE FROM easter_eggs WHERE movie_id=$1", movie.id
-                        )
+                    # A finished scrape replaces the egg set, including when
+                    # validation kept none. A raised pipeline never reaches here.
+                    await conn.execute(
+                        "DELETE FROM easter_eggs WHERE movie_id=$1", movie.id
+                    )
                     for egg in movie.movie_insights.easter_eggs:
                         title = (egg.detail or "")[:200] or "Easter egg"
                         significance = egg.significance or ""
@@ -398,15 +398,21 @@ class DatabaseManager:
                 )
                 return dict(updated) if updated else None
 
-    async def mark_job_done(self, job_id: int):
+    async def mark_job_done(self, job_id: int, attempts: int):
+        """Finish only the attempt this worker claimed.
+
+        A stale worker must not mark done a row that reclaim_stale_jobs
+        requeued and another worker claimed.
+        """
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
                 UPDATE extract_jobs
                 SET status = 'done', finished_at = NOW()
-                WHERE id = $1
+                WHERE id = $1 AND status = 'running' AND attempts = $2
                 """,
                 job_id,
+                attempts,
             )
 
     async def mark_job_error(self, job_id: int, attempts: int, error: str):
@@ -417,10 +423,11 @@ class DatabaseManager:
                     """
                     UPDATE extract_jobs
                     SET status = 'failed', finished_at = NOW(), last_error = $2
-                    WHERE id = $1
+                    WHERE id = $1 AND status = 'running' AND attempts = $3
                     """,
                     job_id,
                     err,
+                    attempts,
                 )
             else:
                 await conn.execute(
@@ -430,9 +437,10 @@ class DatabaseManager:
                         last_error = $2,
                         started_at = NULL,
                         locked_at = NULL
-                    WHERE id = $1
+                    WHERE id = $1 AND status = 'running' AND attempts = $3
                     """,
                     job_id,
                     err,
+                    attempts,
                 )
 

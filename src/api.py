@@ -199,8 +199,19 @@ def health():
 
 
 _SEARCH_TTL = 600
+_SEARCH_MAX = 256
 _search_mem = {}
 _search_inflight = {}
+
+
+def _purge_search_cache(now: float) -> None:
+    """Drop expired search entries, then the soonest deadline past the cap."""
+    expired = [key for key, (deadline, _payload) in _search_mem.items() if deadline <= now]
+    for key in expired:
+        _search_mem.pop(key, None)
+    while len(_search_mem) > _SEARCH_MAX:
+        oldest = min(_search_mem, key=lambda key: _search_mem[key][0])
+        _search_mem.pop(oldest, None)
 
 
 def _search_key(query: str, year):
@@ -275,6 +286,7 @@ async def search_movies_list(q: str = "", query: str = "", year: Optional[int] =
         return {"query": query, "count": 0, "results": []}
     key = _search_key(query, year)
     now = time.time()
+    _purge_search_cache(now)
     cached = _search_mem.get(key)
     if cached and cached[0] > now:
         return cached[1]
@@ -298,6 +310,7 @@ async def search_movies_list(q: str = "", query: str = "", year: Optional[int] =
                         )
                 payload = {"query": query, "count": len(results), "results": results}
                 _search_mem[key] = (now + _SEARCH_TTL, payload)
+                _purge_search_cache(now)
                 if not fut.done():
                     fut.set_result(payload)
             except Exception as e:
