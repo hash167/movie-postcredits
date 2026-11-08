@@ -329,3 +329,59 @@ def test_unreadable_span_is_dropped_and_sibling_still_exports():
     )
     exporter.export([secret])
     assert sink.spans == []
+
+
+def test_resource_preserved_and_link_secrets_masked():
+    """Successful rebuild keeps the resource and does not export link secrets."""
+    pytest.importorskip("opentelemetry.sdk")
+    from opentelemetry.trace import Status, StatusCode
+
+    def setup(span):
+        ctx = span.get_span_context()
+        span.add_link(
+            ctx,
+            {
+                "http.url": f"https://api.example.test/3/movie?api_key={FAKE}&query=Spider-Man",
+                "query": "Spider-Man",
+            },
+        )
+        span.set_status(Status(StatusCode.ERROR, f"status api_key={FAKE}"))
+
+    raw = _finish_span(setup)
+    assert raw.resource is not None
+    sink = _Collect()
+    T.RedactingSpanExporter(sink).export([raw])
+    exported = sink.spans[0]
+    assert exported is not raw
+    assert exported.resource is raw.resource
+    assert len(exported.links) == 1
+    link_attrs = dict(exported.links[0].attributes or {})
+    assert FAKE not in repr(link_attrs)
+    assert link_attrs.get("query") == "Spider-Man"
+    assert "api_key=REDACTED" in link_attrs.get("http.url", "")
+
+
+def test_fail_closed_drops_secret_links():
+    pytest.importorskip("opentelemetry.sdk")
+    from opentelemetry.trace import Status, StatusCode
+
+    def setup(span):
+        span.add_link(
+            span.get_span_context(),
+            {"note": f'{{"api_key": "{FAKE}"}}'},
+        )
+        span.set_status(Status(StatusCode.ERROR, f"api_key={FAKE}"))
+
+    raw = _finish_span(setup)
+    assert FAKE in repr(dict(raw.links[0].attributes))
+
+    def explode(self, span):
+        raise RuntimeError("sanitize failed")
+
+    exporter = T.RedactingSpanExporter(_Collect())
+    exporter._sanitize = explode.__get__(exporter, T.RedactingSpanExporter)
+    cleaned = exporter._clean(raw)
+    assert cleaned is not None and cleaned is not raw
+    assert cleaned.resource is raw.resource
+    assert list(cleaned.links or ()) == []
+    assert FAKE not in repr(cleaned.links)

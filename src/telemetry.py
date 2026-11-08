@@ -220,9 +220,9 @@ def _load_span_types():
     span instead of shipping the original.
     """
     from opentelemetry.sdk.trace import Event, ReadableSpan
-    from opentelemetry.trace import Status, StatusCode
+    from opentelemetry.trace import Link, Status, StatusCode
 
-    return Event, ReadableSpan, Status, StatusCode
+    return Event, ReadableSpan, Status, StatusCode, Link
 
 
 def _redact_status(status, status_cls):
@@ -260,7 +260,27 @@ def _redact_events(events, event_cls):
     return out, changed
 
 
-def _assemble_span(span, attrs, events, status, readable_cls, drop_links=False):
+def _redact_links(links, link_cls):
+    """Return ``(links, changed)``. A link whose attributes cannot be masked is dropped."""
+    if not links:
+        return (), False
+    changed = False
+    out = []
+    for link in links:
+        try:
+            cleaned = redact_attributes(getattr(link, "attributes", None))
+        except Exception:
+            changed = True
+            continue
+        if cleaned is None:
+            out.append(link)
+            continue
+        changed = True
+        out.append(link_cls(getattr(link, "context", None), cleaned))
+    return tuple(out), changed
+
+
+def _assemble_span(span, attrs, events, status, readable_cls, links=None, drop_links=False):
     """Build a new readable span. Never returns ``span`` itself."""
     name = getattr(span, "name", "") or ""
     if isinstance(name, str):
@@ -275,7 +295,7 @@ def _assemble_span(span, attrs, events, status, readable_cls, drop_links=False):
         resource=getattr(span, "resource", None),
         attributes=attrs if attrs is not None else {},
         events=events,
-        links=() if drop_links else getattr(span, "links", ()) or (),
+        links=() if drop_links else (links if links is not None else getattr(span, "links", ()) or ()),
         kind=getattr(span, "kind", None),
         status=status,
         start_time=getattr(span, "start_time", None),
@@ -368,13 +388,20 @@ class RedactingSpanExporter:
         self._inner = inner
 
     def _sanitize(self, span):
-        event_cls, readable_cls, status_cls, _unset = _load_span_types()
+        event_cls, readable_cls, status_cls, _unset, link_cls = _load_span_types()
         attrs = redact_attributes(span.attributes)
         events, ev_changed = _redact_events(span.events, event_cls)
         status, status_changed = _redact_status(span.status, status_cls)
+        links, links_changed = _redact_links(getattr(span, "links", ()) or (), link_cls)
         name = getattr(span, "name", "") or ""
         name_changed = isinstance(name, str) and redact_text(name) != name
-        if attrs is None and not ev_changed and not status_changed and not name_changed:
+        if (
+            attrs is None
+            and not ev_changed
+            and not status_changed
+            and not links_changed
+            and not name_changed
+        ):
             return span
         return _assemble_span(
             span,
@@ -382,12 +409,13 @@ class RedactingSpanExporter:
             events,
             status,
             readable_cls,
+            links=links,
         )
 
     def _scrub(self, span):
         """Rebuild a safe span after sanitization failed. Never the original."""
         try:
-            event_cls, readable_cls, status_cls, unset_code = _load_span_types()
+            event_cls, readable_cls, status_cls, unset_code, _link_cls = _load_span_types()
         except Exception:
             return None
         try:

@@ -288,6 +288,8 @@ class MovieInsights:
         if not articles:
             print("  ⚠️  no articles; skip Ollama")
             return []
+        if not self.ollama_host:
+            raise RuntimeError("OLLAMA_HOST is required")
         label = f"{title} ({year})" if year else title
         use = articles[:2]
         chunks = []

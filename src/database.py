@@ -18,100 +18,108 @@ class DatabaseManager:
         await self.ensure_schema()
 
     async def ensure_schema(self):
-        """Create tables the image expects if a fresh/partial DB is missing them."""
+        """Create tables the image expects if a fresh/partial DB is missing them.
+
+        One transaction holds a session advisory lock so overlapping API and
+        worker startups do not interleave CREATE/DROP VIEW. The lock releases
+        when the transaction ends.
+        """
         async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS batch_logs (
-                    id SERIAL PRIMARY KEY,
-                    tier VARCHAR(50),
-                    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    completed_at TIMESTAMP,
-                    movies_processed INTEGER DEFAULT 0,
-                    movies_failed INTEGER DEFAULT 0,
-                    status VARCHAR(50) DEFAULT 'running'
-                )
-                """
-            )
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS extract_jobs (
-                    id SERIAL PRIMARY KEY,
-                    movie_id INT NOT NULL UNIQUE,
-                    title TEXT,
-                    year INT,
-                    status VARCHAR(20) NOT NULL DEFAULT 'queued',
-                    attempts INT DEFAULT 0,
-                    last_error TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    started_at TIMESTAMP,
-                    finished_at TIMESTAMP,
-                    locked_at TIMESTAMP
-                )
-                """
-            )
-            await conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS extract_jobs_status_created_idx
-                ON extract_jobs (status, created_at)
-                """
-            )
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS movie_insights (
-                    id SERIAL PRIMARY KEY,
-                    movie_id INTEGER NOT NULL UNIQUE REFERENCES movies(id) ON DELETE CASCADE,
-                    discussion_count INTEGER DEFAULT 0,
-                    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-            await conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_movie_insights_movie_id
-                ON movie_insights (movie_id)
-                """
-            )
             async with conn.transaction():
                 await conn.execute("SELECT pg_advisory_xact_lock(872314)")
-                await conn.execute("DROP VIEW IF EXISTS movies_complete")
-                await conn.execute(
-                    "ALTER TABLE easter_eggs ALTER COLUMN significance TYPE TEXT"
-                )
-                await conn.execute(
-                """
-                CREATE VIEW movies_complete AS
-                SELECT m.id,
-                    m.title,
-                    m.year,
-                    m.release_date,
-                    m.runtime_minutes,
-                    m.poster_path,
-                    m.overview,
-                    m.vote_average,
-                    m.popularity,
-                    m.tier,
-                    m.imdb_id,
-                    m.updated_at,
-                    pc.has_scene,
-                    pc.scene_count,
-                    pc.mid_credits,
-                    pc.post_credits AS post_credits_desc,
-                    pc.worth_staying,
-                    pc.spoiler_free_hint,
-                    pc.source_confidence,
-                    ri.discussion_count,
-                    ri.scraped_at AS reddit_scraped_at,
-                    ( SELECT json_agg(json_build_object(
-                          'detail', COALESCE(ee.description, ee.title::text),
-                          'significance', ee.significance)) AS json_agg
-                       FROM easter_eggs ee
-                      WHERE ee.movie_id = m.id) AS easter_eggs
-                FROM movies m
-                LEFT JOIN post_credits pc ON m.id = pc.movie_id
-                LEFT JOIN movie_insights ri ON m.id = ri.movie_id
-                """
+                await self._ensure_schema_locked(conn)
+
+    async def _ensure_schema_locked(self, conn):
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS batch_logs (
+                id SERIAL PRIMARY KEY,
+                tier VARCHAR(50),
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                movies_processed INTEGER DEFAULT 0,
+                movies_failed INTEGER DEFAULT 0,
+                status VARCHAR(50) DEFAULT 'running'
             )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS extract_jobs (
+                id SERIAL PRIMARY KEY,
+                movie_id INT NOT NULL UNIQUE,
+                title TEXT,
+                year INT,
+                status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                attempts INT DEFAULT 0,
+                last_error TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                started_at TIMESTAMP,
+                finished_at TIMESTAMP,
+                locked_at TIMESTAMP
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS extract_jobs_status_created_idx
+            ON extract_jobs (status, created_at)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS movie_insights (
+                id SERIAL PRIMARY KEY,
+                movie_id INTEGER NOT NULL UNIQUE REFERENCES movies(id) ON DELETE CASCADE,
+                discussion_count INTEGER DEFAULT 0,
+                scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_movie_insights_movie_id
+            ON movie_insights (movie_id)
+            """
+        )
+        await conn.execute("DROP VIEW IF EXISTS movies_complete")
+        await conn.execute(
+            "ALTER TABLE easter_eggs ALTER COLUMN significance TYPE TEXT"
+        )
+        await conn.execute(
+            """
+            CREATE VIEW movies_complete AS
+            SELECT m.id,
+                m.title,
+                m.year,
+                m.release_date,
+                m.runtime_minutes,
+                m.poster_path,
+                m.overview,
+                m.vote_average,
+                m.popularity,
+                m.tier,
+                m.imdb_id,
+                m.updated_at,
+                pc.has_scene,
+                pc.scene_count,
+                pc.mid_credits,
+                pc.post_credits AS post_credits_desc,
+                pc.worth_staying,
+                pc.spoiler_free_hint,
+                pc.source_confidence,
+                ri.discussion_count,
+                ri.scraped_at AS reddit_scraped_at,
+                ( SELECT json_agg(json_build_object(
+                      'detail', COALESCE(ee.description, ee.title::text),
+                      'significance', ee.significance)) AS json_agg
+                   FROM easter_eggs ee
+                  WHERE ee.movie_id = m.id) AS easter_eggs
+            FROM movies m
+            LEFT JOIN post_credits pc ON m.id = pc.movie_id
+            LEFT JOIN movie_insights ri ON m.id = ri.movie_id
+            """
+        )
 
     async def close(self):
         if self.pool:
