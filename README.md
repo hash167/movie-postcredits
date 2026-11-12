@@ -71,6 +71,20 @@ pip install pytest
 python3 -m pytest tests -q
 ```
 
+## Container images
+
+[`.github/workflows/image.yml`](.github/workflows/image.yml) publishes this image on every push to `main` and on `workflow_dispatch`:
+
+`ghcr.io/hash167/movie-postcredits-api:<git sha>`
+
+The tag is the full commit SHA. The build context is the repository root, the platform is `linux/amd64`, and the `GIT_SHA` build-arg is that same SHA. The root `Dockerfile` stores it as `org.opencontainers.image.revision`. The API process, the extract worker (`python -m src.extract_worker`), and the `theaters-daily` CronJob (`python -m src.run_batch --mode theaters --export --upload`) all run this image. Pull requests run the same build with `push: false`.
+
+The live frontend is the static app in `frontend/`, served by nginx. `frontend/nginx.conf` and the HTML are mounted from the `movie-frontend` and `movie-frontend-html` ConfigMaps. This repository has no Dockerfile for that nginx image, so the workflow publishes the API image only.
+
+GitHub creates the package as private. To let the cluster pull it with no registry credential, open the package settings and set the visibility to public. To keep it private, create an image pull secret in the cluster from a token with `read:packages`, and name that secret on the pod. Keep the token out of this repository.
+
+Pointing the k3s Deployment and CronJob at `ghcr.io/hash167/movie-postcredits-api:<sha>` is a separate step. This workflow does not deploy and does not contact the cluster.
+
 ## Images
 
 The screenshots in `images/` are from an earlier UI. The current page is the static app under `frontend/`.
